@@ -1,0 +1,17 @@
+services:
+
+  api:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    networks:
+      - app-network
+
+# Docker networks
+networks:
+  app-network:
+    driver: bridge
+    external: true
