@@ -85,6 +85,10 @@ The available indicators are defined in `themes.json`. Example:
 }
 ```
 
+
+## Data Source
+All meteorological data is retrieved from the [ECMWF OpenData service](https://www.ecmwf.int/en/forecasts/datasets/open-data), which provides global weather forecast data in GRIB format. The API uses the ECMWF OpenData client to download and process these files automatically.
+
 ## Directory Structure
 - `main.py`: Main API script
 - `generate_cache.py`: Cache generation script
