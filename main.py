@@ -429,17 +429,19 @@ def create_info_endpoint(file_path: str, param: str, units: str):
 # ===============================
 
 # Register endpoints for each weather theme
+
 for theme, cfg in themes.items():
     # WebP weather map endpoint
     app.get(f"/{theme}/{{time_param}}/data.webp")(
         create_webp_endpoint(cfg["file"], cfg["variable"], cfg["palette"])
     )
-    
-    # GeoJSON isolines endpoint
-    app.get(f"/{theme}/{{time_param}}/isolines.geojson")(
-        create_isolines_endpoint(cfg["file"], cfg["variable"])
-    )
-    
+
+    # GeoJSON isolines endpoint only for mean sea level pressure
+    if theme == "mean_sea_level_pressure":
+        app.get(f"/{theme}/{{time_param}}/isolines.geojson")(
+            create_isolines_endpoint(cfg["file"], cfg["variable"])
+        )
+
     # Data information endpoint
     app.get(f"/{theme}/{{time_param}}/info")(
         create_info_endpoint(cfg["file"], cfg["variable"], cfg["units"])
@@ -456,7 +458,7 @@ def get_themes_json():
 
 @app.get("/")
 def redirect_to_docs():
-    """Redireciona para a documentação Swagger."""
+    """Redirect root to API documentation."""
     return RedirectResponse(url="/docs")
 
 

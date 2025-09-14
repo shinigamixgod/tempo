@@ -1,4 +1,3 @@
-
 # Tempo API
 
 This service provides meteorological data processing and caching for maritime and weather applications. It is built with FastAPI and is Docker-ready for easy deployment.
