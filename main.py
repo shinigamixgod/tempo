@@ -285,34 +285,43 @@ def create_line_feature(line_geom, level_value):
 # ENDPOINT FACTORY FUNCTIONS
 # ===============================
 
-def create_webp_endpoint(file_path: str, param: str, palette: list):
+def create_webp_endpoint(file_path, param, palette):
     def endpoint(time_param: str, force: bool = False):
-        # Validate timestamp
         parse_time_param(time_param)
-        webp_path = os.path.join("static", f"{param}_{time_param}_rgb.webp")
+        # VECTOR theme: wind
+        if isinstance(param, list) and len(param) == 2:
+            webp_path = os.path.join("static", f"wind_{time_param}_rgb.webp")
+            if os.path.exists(webp_path) and not force:
+                print(f"[CACHE] Using cached WebP: {webp_path}")
+                return FileResponse(webp_path, media_type="image/webp")
 
-        # Return cached file if available
-        if os.path.exists(webp_path) and not force:
-            print(f"[CACHE] Using cached WebP: {webp_path}")
+            print(f"[PROCESS] Generating new VECTOR WebP: {webp_path}")
+            # Download U and V
+            u_data = download_grib(file_path[0], param[0], force)
+            v_data = download_grib(file_path[1], param[1], force)
+            u = np.nan_to_num(u_data.values)
+            v = np.nan_to_num(v_data.values)
+            mod = np.sqrt(u**2 + v**2)
+            # Apply palette to wind speed (modulus)
+            rgb_array = apply_palette_to_data_vectorized(mod, palette)
+            img = Image.fromarray(rgb_array.astype(np.uint8), mode='RGB')
+            img.save(webp_path, format="WEBP", quality=95, method=6)
+            print(f"[PROCESS] VECTOR WebP file generated: {webp_path}")
             return FileResponse(webp_path, media_type="image/webp")
+        else:
+            webp_path = os.path.join("static", f"{param}_{time_param}_rgb.webp")
+            if os.path.exists(webp_path) and not force:
+                print(f"[CACHE] Using cached WebP: {webp_path}")
+                return FileResponse(webp_path, media_type="image/webp")
 
-        # Generate new WebP image
-        print(f"[PROCESS] Generating new WebP: {webp_path}")
-        
-        # Download and process weather data
-        data = download_grib(file_path, param, force)
-        array = np.nan_to_num(data.values, nan=np.nanmean(data.values))
-        
-        # Apply color mapping
-        rgb_array = apply_palette_to_data_vectorized(array, palette)
-        
-        # Create and save WebP image
-        img = Image.fromarray(rgb_array.astype(np.uint8), mode='RGB')
-        img.save(webp_path, format="WEBP", quality=95, method=6)
-        
-        print(f"[PROCESS] WebP file generated: {webp_path}")
-        return FileResponse(webp_path, media_type="image/webp")
-    
+            print(f"[PROCESS] Generating new WebP: {webp_path}")
+            data = download_grib(file_path, param, force)
+            array = np.nan_to_num(data.values, nan=np.nanmean(data.values))
+            rgb_array = apply_palette_to_data_vectorized(array, palette)
+            img = Image.fromarray(rgb_array.astype(np.uint8), mode='RGB')
+            img.save(webp_path, format="WEBP", quality=95, method=6)
+            print(f"[PROCESS] WebP file generated: {webp_path}")
+            return FileResponse(webp_path, media_type="image/webp")
     return endpoint
 
 def create_isolines_endpoint(file_path: str, param: str):
