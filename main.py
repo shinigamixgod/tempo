@@ -6,6 +6,7 @@
 # IMPORTS AND DEPENDENCIES
 # ===============================
 
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse, RedirectResponse
 from ecmwf.opendata import Client
@@ -21,7 +22,7 @@ import time
 import matplotlib.pyplot as plt
 import geojsoncontour
 from shapely.geometry import shape, LineString
-from scipy import ndimage  
+from scipy import ndimage
 import shapely
 
 # ===============================
@@ -41,60 +42,66 @@ os.makedirs("static/grib", exist_ok=True)
 # UTILITY FUNCTIONS
 # ===============================
 
+
 def clean_old_cache(param: str, cache_dir: str = "static", max_age_hours: int = 24):
     now = time.time()
     pattern = os.path.join(cache_dir, f"{param}_*_*.json")
-    
+
     for file_path in glob.glob(pattern):
         try:
             mtime = os.path.getmtime(file_path)
             age_hours = (now - mtime) / 3600.0
-            
+
             if age_hours > max_age_hours:
                 os.remove(file_path)
                 print(f"[CACHE] Removed old cache file: {file_path}")
         except Exception as e:
             print(f"[CACHE] Error removing {file_path}: {e}")
 
+
 def parse_time_param(time_str: str) -> datetime:
     try:
         ts = datetime.strptime(time_str, "%Y%m%d%H")
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid time format: use YYYYMMDDHH")
-    
+        raise HTTPException(
+            status_code=400, detail="Invalid time format: use YYYYMMDDHH")
+
     # Validate timestamp is within allowed range (-24h to +24h from now)
     now = datetime.utcnow()
     if not (now - timedelta(hours=24) <= ts <= now + timedelta(hours=24)):
-        raise HTTPException(status_code=400, detail="Timestamp out of allowed range (-24h to +24h)")
-    
+        raise HTTPException(
+            status_code=400, detail="Timestamp out of allowed range (-24h to +24h)")
+
     return ts
 
 # ===============================
 # GRIB DATA PROCESSING
 # ===============================
 
+
 def download_grib(file_path: str, param: str, force: bool = False) -> xr.DataArray:
     # Extract timestamp from file path
     match = re.search(r"(\d{10})", file_path)
-    time_param = match.group(1) if match else datetime.utcnow().strftime("%Y%m%d%H")
+    time_param = match.group(
+        1) if match else datetime.utcnow().strftime("%Y%m%d%H")
     cache_path = os.path.join("static", "grib", f"{param}_{time_param}.grib2")
-    
+
     # Use cached file if available and not forcing refresh
     if os.path.exists(cache_path) and not force:
         print(f"[CACHE] Using cached GRIB file: {cache_path}")
         ds = xr.open_dataset(cache_path, engine="cfgrib")
         data = ds[param] if param in ds else ds[list(ds.data_vars)[0]]
-        
+
         # Ensure time dimension exists
         if "time" not in data.dims:
             data = data.expand_dims("time")
-        
+
         print(f"[CACHE] GRIB file loaded from cache.")
         return data.isel(time=0)
 
     # Download fresh data from ECMWF
     print(f"[DOWNLOAD] Downloading GRIB file from ECMWF: {cache_path}")
-    
+
     # Remove existing index file to avoid conflicts
     idx_file = cache_path + ".idx"
     if os.path.exists(idx_file):
@@ -103,30 +110,31 @@ def download_grib(file_path: str, param: str, force: bool = False) -> xr.DataArr
     # Download using ECMWF OpenData client
     client = Client(source="ecmwf")
     client.retrieve(
-        time=0, 
-        stream="oper", 
-        type="fc", 
-        step=24, 
-        param=param, 
+        time=0,
+        stream="oper",
+        type="fc",
+        step=24,
+        param=param,
         target=cache_path
     )
-    
+
     print(f"[DOWNLOAD] Download complete: {cache_path}")
-    
+
     # Load and process the downloaded data
     ds = xr.open_dataset(cache_path, engine="cfgrib")
     data = ds[param] if param in ds else ds[list(ds.data_vars)[0]]
-    
+
     # Ensure time dimension exists
     if "time" not in data.dims:
         data = data.expand_dims("time")
-    
+
     print(f"[PROCESS] GRIB file loaded and processed.")
     return data.isel(time=0)
 
 # ===============================
 # IMAGE PROCESSING AND VISUALIZATION
 # ===============================
+
 
 def apply_palette_to_data_vectorized(data_array: np.ndarray, palette: list) -> np.ndarray:
     # Sort palette by data values and extract components
@@ -137,7 +145,7 @@ def apply_palette_to_data_vectorized(data_array: np.ndarray, palette: list) -> n
 
     # Initialize RGB output array
     rgb_array = np.zeros((*data_array.shape, 3), dtype=np.uint8)
-    
+
     # Clip data to palette range
     data_clipped = np.clip(data_array, levels[0], levels[-1])
 
@@ -164,12 +172,13 @@ def apply_palette_to_data_vectorized(data_array: np.ndarray, palette: list) -> n
 # CONTOUR LINE GENERATION
 # ===============================
 
-def generate_isolines_geojson(array: np.ndarray, lat_coords=None, lon_coords=None, 
-                            interval=2.0, ndigits=3, unit='m') -> dict:
+
+def generate_isolines_geojson(array: np.ndarray, lat_coords=None, lon_coords=None,
+                              interval=2.0, ndigits=3, unit='m') -> dict:
     interval = float(interval)
     if interval <= 0:
         raise ValueError("Interval must be positive.")
-    
+
     # Validate input data
     valid_data = array[~np.isnan(array)]
     if len(valid_data) == 0:
@@ -178,48 +187,52 @@ def generate_isolines_geojson(array: np.ndarray, lat_coords=None, lon_coords=Non
 
     # Skip uniform data (no contours possible)
     if np.all(valid_data == valid_data[0]):
-        print(f"[ISOLINES] Uniform data ({valid_data[0]}), no isolines to generate.")
+        print(
+            f"[ISOLINES] Uniform data ({valid_data[0]}), no isolines to generate.")
         return {"type": "FeatureCollection", "features": []}
-    
+
     # Apply Gaussian smoothing for cleaner meteorological contours
 
     # Sigma values for smoothing
     sigma = [3.0, 3.0]  # [lat_sigma, lon_sigma]
     print(f"[ISOLINES] Applying Gaussian smoothing with sigma={sigma}")
-    
+
     # Apply Gaussian filter with constant boundary conditions
     array = ndimage.gaussian_filter(array, sigma, mode='constant', cval=np.nan)
     print("[ISOLINES] Gaussian smoothing applied successfully")
-    
+
     # Calculate contour levels
-    data_min, data_max = np.floor(np.min(valid_data)), np.ceil(np.max(valid_data))
-    print(f"[ISOLINES] Data range: {data_min} to {data_max}, Interval: {interval}")
-    
+    data_min, data_max = np.floor(
+        np.min(valid_data)), np.ceil(np.max(valid_data))
+    print(
+        f"[ISOLINES] Data range: {data_min} to {data_max}, Interval: {interval}")
+
     levels = np.arange(
         np.floor(data_min / interval) * interval,
         np.ceil(data_max / interval) * interval + interval,
         interval
     )
     print(f"[ISOLINES] Contour levels: {levels}")
-    
+
     # Set up coordinate system
     height, width = array.shape
     if lat_coords is None:
         lat_coords = np.linspace(-90, 90, height)
     if lon_coords is None:
         lon_coords = np.linspace(-180, 180, width)
-    
+
     # Create coordinate meshgrid
     lon_grid, lat_grid = np.meshgrid(lon_coords, lat_coords)
-    
+
     # Generate contours using matplotlib
     figure = plt.figure(figsize=(12, 8))
     ax = figure.add_subplot(111)
-    
+
     try:
         # Create filled contour plot
-        contourf = ax.contourf(lon_grid, lat_grid, array, levels=levels, extend='both')
-        
+        contourf = ax.contourf(lon_grid, lat_grid, array,
+                               levels=levels, extend='both')
+
         # Convert matplotlib contours to GeoJSON
         geojson_str = geojsoncontour.contourf_to_geojson(
             contourf=contourf,
@@ -228,7 +241,7 @@ def generate_isolines_geojson(array: np.ndarray, lat_coords=None, lon_coords=Non
             stroke_width=1,
             fill_opacity=0
         )
-        
+
     except Exception as e:
         print(f"[ISOLINES] Error generating contours: {e}")
         return {"type": "FeatureCollection", "features": []}
@@ -239,35 +252,41 @@ def generate_isolines_geojson(array: np.ndarray, lat_coords=None, lon_coords=Non
     try:
         geo = json.loads(geojson_str)
         line_features = []
-        
+
         for feature in geo["features"]:
             geom = shape(feature["geometry"])
             level_value = feature["properties"].get("level", None)
-            
+
             # Convert polygons and multipolygons to line strings
             if geom.geom_type == "Polygon":
                 line = LineString(geom.exterior.coords)
-                line = shapely.simplify(line, tolerance=0.05, preserve_topology=True)
+                line = shapely.simplify(
+                    line, tolerance=0.05, preserve_topology=True)
                 line_features.append(create_line_feature(line, level_value))
-                
+
             elif geom.geom_type == "MultiPolygon":
                 for poly in geom.geoms:
                     line = LineString(poly.exterior.coords)
-                    line = shapely.simplify(line, tolerance=0.05, preserve_topology=True)
-                    line_features.append(create_line_feature(line, level_value))
-                    
+                    line = shapely.simplify(
+                        line, tolerance=0.05, preserve_topology=True)
+                    line_features.append(
+                        create_line_feature(line, level_value))
+
             elif geom.geom_type == "LineString":
-                line = shapely.simplify(geom, tolerance=0.05, preserve_topology=True)
+                line = shapely.simplify(
+                    geom, tolerance=0.05, preserve_topology=True)
                 line_features.append(create_line_feature(line, level_value))
             else:
-                print(f"[ISOLINES] Skipping unsupported geometry type: {geom.geom_type}")
-        
+                print(
+                    f"[ISOLINES] Skipping unsupported geometry type: {geom.geom_type}")
+
         print(f"[ISOLINES] Generated {len(line_features)} isoline features")
         return {"type": "FeatureCollection", "features": line_features}
-        
+
     except Exception as e:
         print(f"[ISOLINES] Error processing GeoJSON: {e}")
         return {"type": "FeatureCollection", "features": []}
+
 
 def create_line_feature(line_geom, level_value):
     return {
@@ -284,6 +303,7 @@ def create_line_feature(line_geom, level_value):
 # ===============================
 # ENDPOINT FACTORY FUNCTIONS
 # ===============================
+
 
 def create_webp_endpoint(file_path, param, palette):
     def endpoint(time_param: str, force: bool = False):
@@ -309,7 +329,8 @@ def create_webp_endpoint(file_path, param, palette):
             print(f"[PROCESS] VECTOR WebP file generated: {webp_path}")
             return FileResponse(webp_path, media_type="image/webp")
         else:
-            webp_path = os.path.join("static", f"{param}_{time_param}_rgb.webp")
+            webp_path = os.path.join(
+                "static", f"{param}_{time_param}_rgb.webp")
             if os.path.exists(webp_path) and not force:
                 print(f"[CACHE] Using cached WebP: {webp_path}")
                 return FileResponse(webp_path, media_type="image/webp")
@@ -324,67 +345,74 @@ def create_webp_endpoint(file_path, param, palette):
             return FileResponse(webp_path, media_type="image/webp")
     return endpoint
 
-def create_isolines_endpoint(file_path: str, param: str):
-    def endpoint(time_param: str,
-                 force: bool = False,
-                 background_tasks: BackgroundTasks = None):
-        
-        # Validate timestamp
-        parse_time_param(time_param)
 
-        # Download weather data
+# Adicione Request ao import
+
+# Substitua a função create_isolines_endpoint por esta versão simplificada:
+
+def create_isolines_endpoint(file_path: str, param: str):
+    def endpoint(time_param: str, force: bool = False, background_tasks: BackgroundTasks = None, request: Request = None):
+        parse_time_param(time_param)
         data = download_grib(file_path, param, force)
         array = np.nan_to_num(data.values, nan=np.nanmean(data.values))
 
-        # Calculate optimal interval for the data
         valid_values = array[~np.isnan(array)]
         data_min = float(np.min(valid_values))
         data_max = float(np.max(valid_values))
         suggested_interval = max(1, round((data_max - data_min) / 50, 1))
 
-        # Set up cache file path
-        geojson_path = os.path.join("static", f"{param}_{time_param}_{suggested_interval}_isolines.json")
+        geojson_path = os.path.join(
+            "static", f"{param}_{time_param}_{suggested_interval}_isolines.json")
 
-        # Schedule cache cleanup
         if background_tasks:
             background_tasks.add_task(clean_old_cache, param)
 
-        # Return cached file if available
+        # Verificar se é Swagger UI
+        is_swagger = request and "/docs" in request.headers.get("referer", "")
+
         if os.path.exists(geojson_path) and not force:
-            print(f"[CACHE] Using cached GeoJSON: {geojson_path}")
+            if is_swagger:
+                with open(geojson_path, 'r') as f:
+                    full_data = json.load(f)
+                return {
+                    "type": "FeatureCollection",
+                    "features": full_data["features"][:10],
+                    "note": f"Swagger preview: 10 of {len(full_data['features'])} features"
+                }
             return FileResponse(geojson_path, media_type="application/json")
 
-        # Generate new isolines
-        print(f"[PROCESS] Generating new GeoJSON isolines: {geojson_path}")
-        
-        # Extract coordinate information
+        # Gerar novos isolines
         lat_coords = data.coords.get('latitude', data.coords.get('lat'))
         lon_coords = data.coords.get('longitude', data.coords.get('lon'))
         lat_values = lat_coords.values if lat_coords is not None else None
         lon_values = lon_coords.values if lon_coords is not None else None
 
-        # Generate isolines GeoJSON
         geojson_data = generate_isolines_geojson(
-            array, lat_values, lon_values, suggested_interval
-        )
+            array, lat_values, lon_values, suggested_interval)
 
-        # Cache the result
         with open(geojson_path, 'w') as f:
             json.dump(geojson_data, f, indent=2)
-        print(f"[PROCESS] GeoJSON isolines generated and cached: {geojson_path}")
+
+        if is_swagger:
+            return {
+                "type": "FeatureCollection",
+                "features": geojson_data["features"][:10],
+                "note": f"Swagger preview: 10 of {len(geojson_data['features'])} features"
+            }
 
         return FileResponse(geojson_path, media_type="application/json")
-    
+
     return endpoint
+
 
 def create_info_endpoint(file_path: str, param: str, units: str):
     def endpoint(time_param: str, force: bool = False):
         # Validate timestamp
         parse_time_param(time_param)
-        
+
         # Load weather data
         data = download_grib(file_path, param, force)
-        
+
         # Extract coordinate information
         lat_coords = data.coords.get('latitude', data.coords.get('lat'))
         lon_coords = data.coords.get('longitude', data.coords.get('lon'))
@@ -392,14 +420,14 @@ def create_info_endpoint(file_path: str, param: str, units: str):
         # Calculate spatial bounds and resolution
         bounds = [-180, -90, 180, 90]  # Default global bounds
         resolution = {"lat": 0.25, "lon": 0.25}  # Default ECMWF resolution
-        
+
         if lat_coords is not None and lon_coords is not None:
             lat_values, lon_values = lat_coords.values, lon_coords.values
             bounds = [
                 float(lon_values.min()), float(lat_values.min()),
                 float(lon_values.max()), float(lat_values.max())
             ]
-            
+
             # Calculate actual resolution
             if len(lat_values) > 1:
                 resolution["lat"] = float(abs(lat_values[1] - lat_values[0]))
@@ -409,8 +437,9 @@ def create_info_endpoint(file_path: str, param: str, units: str):
         # Calculate data statistics
         values = data.values
         valid_values = values[~np.isnan(values)]
-        data_min, data_max = float(np.min(valid_values)), float(np.max(valid_values))
-        
+        data_min, data_max = float(
+            np.min(valid_values)), float(np.max(valid_values))
+
         # Suggest optimal contour interval
         suggested_interval = max(1, round((data_max - data_min) / 20, 1))
 
@@ -430,7 +459,7 @@ def create_info_endpoint(file_path: str, param: str, units: str):
                 "resolution": resolution
             },
         }
-    
+
     return endpoint
 
 # ===============================
@@ -438,6 +467,7 @@ def create_info_endpoint(file_path: str, param: str, units: str):
 # ===============================
 
 # Register endpoints for each weather theme
+
 
 for theme, cfg in themes.items():
     # WebP weather map endpoint
@@ -460,10 +490,12 @@ for theme, cfg in themes.items():
 # STATIC AND ROOT ENDPOINTS
 # ===============================
 
+
 @app.get("/themes.json", response_class=FileResponse)
 def get_themes_json():
     """Serve the weather themes configuration file."""
     return FileResponse("themes.json", media_type="application/json")
+
 
 @app.get("/")
 def redirect_to_docs():
