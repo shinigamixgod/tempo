@@ -29,7 +29,20 @@ import shapely
 # APPLICATION INITIALIZATION
 # ===============================
 
-app = FastAPI(title="Tempo API", version="1.0.0")
+app = FastAPI(
+    title="Tempo API",
+    version="1.0.0",
+    description="""
+Tempo API provides weather data visualization and analysis endpoints, including:
+- WebP weather maps for various meteorological parameters
+- GeoJSON isolines for mean sea level pressure
+- Data statistics and metadata endpoints
+
+All endpoints are designed for fast, automated weather data delivery. Data source: ECMWF OpenData (European Centre for Medium-Range Weather Forecasts).
+
+Endpoints are grouped by weather theme for easier navigation.
+"""
+)
 
 # Load weather themes configuration
 with open("themes.json") as f:
@@ -307,6 +320,15 @@ def create_line_feature(line_geom, level_value):
 
 def create_webp_endpoint(file_path, param, palette):
     def endpoint(time_param: str, force: bool = False):
+        """
+        Returns a weather map as a WebP image for the given theme and timestamp.
+        If the theme is wind, combines U and V components into a colorized wind speed map.
+        Parameters:
+            time_param (str): UTC timestamp in YYYYMMDDHH format
+            force (bool): If True, forces regeneration of the image
+        Returns:
+            WebP image file
+        """
         parse_time_param(time_param)
         # VECTOR theme: wind
         if isinstance(param, list) and len(param) == 2:
@@ -345,13 +367,17 @@ def create_webp_endpoint(file_path, param, palette):
             return FileResponse(webp_path, media_type="image/webp")
     return endpoint
 
-
-# Adicione Request ao import
-
-# Substitua a função create_isolines_endpoint por esta versão simplificada:
-
 def create_isolines_endpoint(file_path: str, param: str):
     def endpoint(time_param: str, force: bool = False, background_tasks: BackgroundTasks = None, request: Request = None):
+        """
+        Returns GeoJSON isolines for mean sea level pressure for the given timestamp.
+        If accessed from Swagger UI, returns only a sample (10 features) for preview.
+        Parameters:
+            time_param (str): UTC timestamp in YYYYMMDDHH format
+            force (bool): If True, forces regeneration of the isolines
+        Returns:
+            GeoJSON file or sample dict
+        """
         parse_time_param(time_param)
         data = download_grib(file_path, param, force)
         array = np.nan_to_num(data.values, nan=np.nanmean(data.values))
@@ -407,6 +433,15 @@ def create_isolines_endpoint(file_path: str, param: str):
 
 def create_info_endpoint(file_path: str, param: str, units: str):
     def endpoint(time_param: str, force: bool = False):
+        """
+        Returns metadata and statistics for the selected weather parameter and timestamp.
+        Includes value range, mean, standard deviation, spatial bounds, and grid resolution.
+        Parameters:
+            time_param (str): UTC timestamp in YYYYMMDDHH format
+            force (bool): If True, forces data refresh
+        Returns:
+            JSON dict with statistics and metadata
+        """
         # Validate timestamp
         parse_time_param(time_param)
 
@@ -440,9 +475,6 @@ def create_info_endpoint(file_path: str, param: str, units: str):
         data_min, data_max = float(
             np.min(valid_values)), float(np.max(valid_values))
 
-        # Suggest optimal contour interval
-        suggested_interval = max(1, round((data_max - data_min) / 20, 1))
-
         return {
             "parameter": param,
             "units": units,
@@ -468,21 +500,29 @@ def create_info_endpoint(file_path: str, param: str, units: str):
 
 # Register endpoints for each weather theme
 
-
 for theme, cfg in themes.items():
     # WebP weather map endpoint
-    app.get(f"/{theme}/{{time_param}}/data.webp")(
+    app.get(
+        f"/{theme}/{{time_param}}/data.webp",
+        tags=[theme.replace('_', ' ').title()]
+    )(
         create_webp_endpoint(cfg["file"], cfg["variable"], cfg["palette"])
     )
 
     # GeoJSON isolines endpoint only for mean sea level pressure
     if theme == "mean_sea_level_pressure":
-        app.get(f"/{theme}/{{time_param}}/isolines.geojson")(
+        app.get(
+            f"/{theme}/{{time_param}}/isolines.geojson",
+            tags=[theme.replace('_', ' ').title()]
+        )(
             create_isolines_endpoint(cfg["file"], cfg["variable"])
         )
 
     # Data information endpoint
-    app.get(f"/{theme}/{{time_param}}/info")(
+    app.get(
+        f"/{theme}/{{time_param}}/info",
+        tags=[theme.replace('_', ' ').title()]
+    )(
         create_info_endpoint(cfg["file"], cfg["variable"], cfg["units"])
     )
 
@@ -491,25 +531,29 @@ for theme, cfg in themes.items():
 # ===============================
 
 
-@app.get("/themes.json", response_class=FileResponse)
+@app.get("/themes.json", tags=["Static"], response_class=FileResponse)
 def get_themes_json():
-    """Serve the weather themes configuration file."""
+    """
+    Returns the weather themes configuration file in JSON format.
+    Useful for discovering available weather map types and their parameters.
+    """
     return FileResponse("themes.json", media_type="application/json")
 
 
-@app.get("/")
+@app.get("/", tags=["Static"])
 def redirect_to_docs():
-    """Redirect root to API documentation."""
+    """
+    Redirects the root URL to the interactive API documentation (Swagger UI).
+    """
     return RedirectResponse(url="/docs")
 
 
-# ===============================
-# APPLICATION HEALTH CHECK
-# ===============================
-
-@app.get("/health")
+@app.get("/health", tags=["Static"])
 def health_check():
-    """Health check endpoint for monitoring."""
+    """
+    Health check endpoint for monitoring API status and cache usage.
+    Returns basic status, current UTC timestamp, cache directory, and number of loaded themes.
+    """
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
