@@ -13,7 +13,7 @@ if /I "%1"=="build" (
 )
 
 :: List of custom image services
-set IMAGES=webapp ais-processor ais-stream
+set IMAGES=tempo
 
 for %%I in (%IMAGES%) do (
     echo 🚀 Pushing !DOCKERHUB_USER!/%%I:latest to Docker Hub...
