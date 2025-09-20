@@ -3,5 +3,5 @@ version: '3.9'
 services:
   tempo:
     build:
-      context: ./
+      context: ./../
     image: geoglify/tempo:latest
