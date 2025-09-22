@@ -17,3 +17,4 @@ ecmwf-opendata==0.3.23
 scipy==1.16.2
 scikit-image==0.25.2
 geojsoncontour==0.5.1
+filelock==3.12.2

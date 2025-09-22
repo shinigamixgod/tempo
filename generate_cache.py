@@ -1,11 +1,12 @@
 from datetime import datetime
-from main import themes, create_webp_endpoint, create_isolines_endpoint
+from main import themes, create_webp_endpoint, create_isolines_endpoint, create_wind_texture_endpoint
 
 now = datetime.utcnow()
 time_param = now.strftime("%Y%m%d%H")
 
 for theme, cfg in themes.items():
-    # WebP
+
+    # Generate and cache WebP image
     webp_endpoint = create_webp_endpoint(cfg["file"], cfg["variable"], cfg["palette"])
     webp_endpoint(time_param, force=True)
 
@@ -13,3 +14,8 @@ for theme, cfg in themes.items():
     if theme == "mean_sea_level_pressure":
         isolines_endpoint = create_isolines_endpoint(cfg["file"], cfg["variable"])
         isolines_endpoint(time_param, force=True)
+
+    # Wind texture only for wind theme
+    if theme == "wind" and isinstance(cfg["variable"], list):
+        wind_texture_endpoint = create_wind_texture_endpoint(cfg["file"], cfg["variable"])
+        wind_texture_endpoint(time_param, force=True)

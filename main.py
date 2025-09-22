@@ -316,8 +316,6 @@ def create_line_feature(line_geom, level_value):
 # ===============================
 # ENDPOINT FACTORY FUNCTIONS
 # ===============================
-
-
 def create_webp_endpoint(file_path, param, palette):
     def endpoint(time_param: str, force: bool = False):
         """
@@ -430,6 +428,84 @@ def create_isolines_endpoint(file_path: str, param: str):
 
     return endpoint
 
+# ===============================
+# WIND TEXTURE PROCESSING
+# ===============================
+def create_wind_texture(u_data: np.ndarray, v_data: np.ndarray, output_size=(512, 512)) -> Image.Image:
+    """
+    Creates a wind texture from U/V components for WebGL particle system.
+    R channel = U component (scaled and offset)
+    G channel = V component (scaled and offset) 
+    B channel = Wind speed magnitude
+    """
+    # Resize data to texture dimensions
+    from scipy.ndimage import zoom
+    
+    original_shape = u_data.shape
+    zoom_factors = (output_size[0] / original_shape[0], output_size[1] / original_shape[1])
+    
+    u_resized = zoom(u_data, zoom_factors, order=1)
+    v_resized = zoom(v_data, zoom_factors, order=1)
+    
+    # Calculate wind speed magnitude
+    speed = np.sqrt(u_resized**2 + v_resized**2)
+    
+    # Normalize components to 0-255 range
+    # Assuming wind components range from -50 to +50 m/s
+    u_normalized = np.clip((u_resized + 50) / 100 * 255, 0, 255).astype(np.uint8)
+    v_normalized = np.clip((v_resized + 50) / 100 * 255, 0, 255).astype(np.uint8)
+    
+    # Normalize speed to 0-255 (assuming max speed ~70 m/s)
+    speed_normalized = np.clip(speed / 70 * 255, 0, 255).astype(np.uint8)
+    
+    # Create RGB texture
+    texture_array = np.stack([u_normalized, v_normalized, speed_normalized], axis=-1)
+    
+    return Image.fromarray(texture_array, mode='RGB')
+
+def create_wind_texture_endpoint(file_paths: list, params: list):
+    """Factory function for wind texture endpoint"""
+    def endpoint(time_param: str, force: bool = False, size: int = 512):
+        """
+        Returns wind data as RGB texture for WebGL particle system.
+        R = U component, G = V component, B = Wind speed magnitude
+        
+        Parameters:
+            time_param (str): UTC timestamp in YYYYMMDDHH format  
+            force (bool): If True, forces regeneration
+            size (int): Texture size (default 512x512)
+        Returns:
+            PNG image file with wind data encoded in RGB channels
+        """
+        parse_time_param(time_param)
+        
+        # Cache path for wind texture
+        texture_path = os.path.join("static", f"wind_texture_{time_param}_{size}.png")
+        
+        if os.path.exists(texture_path) and not force:
+            print(f"[CACHE] Using cached wind texture: {texture_path}")
+            return FileResponse(texture_path, media_type="image/png")
+        
+        print(f"[PROCESS] Generating new wind texture: {texture_path}")
+        
+        # Download U and V components
+        u_data = download_grib(file_paths[0], params[0], force)
+        v_data = download_grib(file_paths[1], params[1], force)
+        
+        # Extract numpy arrays
+        u_array = np.nan_to_num(u_data.values, nan=0)
+        v_array = np.nan_to_num(v_data.values, nan=0)
+        
+        # Create wind texture
+        texture_img = create_wind_texture(u_array, v_array, (size, size))
+        
+        # Save texture
+        texture_img.save(texture_path, format="PNG", optimize=True)
+        
+        print(f"[PROCESS] Wind texture generated: {texture_path}")
+        return FileResponse(texture_path, media_type="image/png")
+    
+    return endpoint
 
 def create_info_endpoint(file_path: str, param: str, units: str):
     def endpoint(time_param: str, force: bool = False):
@@ -516,6 +592,15 @@ for theme, cfg in themes.items():
             tags=[theme.replace('_', ' ').title()]
         )(
             create_isolines_endpoint(cfg["file"], cfg["variable"])
+        )
+
+    # Add wind texture endpoint for wind theme only
+    if theme == "wind" and isinstance(cfg["variable"], list):
+        app.get(
+            f"/{theme}/{{time_param}}/texture.png",
+            tags=[theme.replace('_', ' ').title()]
+        )(
+            create_wind_texture_endpoint(cfg["file"], cfg["variable"])
         )
 
     # Data information endpoint
