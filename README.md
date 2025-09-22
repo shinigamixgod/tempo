@@ -206,4 +206,5 @@ This way, your tooltips will always be accurate and can show more useful info to
 
 ---
 
-Questions or ideas? Just open an issue or contact the maintainer.
+Questions or ideas? Just open an issue or contact me.
+
