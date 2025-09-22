@@ -1,6 +1,6 @@
 # Tempo API
 
-Tempo API is a simple weather data service. It gives you weather maps and info for different weather types, like temperature, wind, rain, and pressure. You can run it with Docker or Python, and use it with any frontend (like Vue + Deck.gl).
+Tempo API is a simple weather data service. It gives you weather maps and info for different weather types, like temperature, wind, rain, and pressure. You can run it with Docker or Python, and use it with any frontend (like Vue + Maplibre + Deck.gl).
 
 ## What does it do?
 
@@ -207,4 +207,5 @@ This way, your tooltips will always be accurate and can show more useful info to
 ---
 
 Questions or ideas? Just open an issue or contact me.
+
 
