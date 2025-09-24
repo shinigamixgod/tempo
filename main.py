@@ -67,9 +67,8 @@ def clean_old_cache(param: str, cache_dir: str = "static", max_age_hours: int = 
 
             if age_hours > max_age_hours:
                 os.remove(file_path)
-                print(f"[CACHE] Removed old cache file: {file_path}")
-        except Exception as e:
-            print(f"[CACHE] Error removing {file_path}: {e}")
+        except Exception:
+            pass
 
 
 def parse_time_param(time_str: str) -> datetime:
@@ -79,11 +78,11 @@ def parse_time_param(time_str: str) -> datetime:
         raise HTTPException(
             status_code=400, detail="Invalid time format: use YYYYMMDDHH")
 
-    # Validate timestamp is within allowed range (-24h to +24h from now)
+    # Allow a wider range: -120h to +120h from now
     now = datetime.utcnow()
-    if not (now - timedelta(hours=24) <= ts <= now + timedelta(hours=24)):
+    if not (now - timedelta(hours=120) <= ts <= now + timedelta(hours=120)):
         raise HTTPException(
-            status_code=400, detail="Timestamp out of allowed range (-24h to +24h)")
+            status_code=400, detail="Timestamp out of allowed range (-120h to +120h)")
 
     return ts
 
@@ -92,56 +91,152 @@ def parse_time_param(time_str: str) -> datetime:
 # ===============================
 
 
-def download_grib(file_path: str, param: str, force: bool = False) -> xr.DataArray:
-    # Extract timestamp from file path
-    match = re.search(r"(\d{10})", file_path)
-    time_param = match.group(
-        1) if match else datetime.utcnow().strftime("%Y%m%d%H")
-    cache_path = os.path.join("static", "grib", f"{param}_{time_param}.grib2")
+def download_grib(file_path: str, param: str, force: bool = False, time_param: str = None) -> xr.DataArray:
+    # Get timestamp from time_param (always from request)
+    # file_path is only the base name, not timestamp
+    # time_param is always passed by endpoints
+    if time_param is None:
+        time_param = datetime.utcnow().strftime("%Y%m%d%H")
+    dt = datetime.strptime(time_param, "%Y%m%d%H")
+    valid_cycles = [0, 6, 12, 18]
+    cycle_hour = max([h for h in valid_cycles if h <= dt.hour], default=None)
+    if cycle_hour is None:
+        cycle_hour = valid_cycles[0]
+    cycle_dt = dt.replace(hour=cycle_hour, minute=0, second=0, microsecond=0)
+    step = int((dt - cycle_dt).total_seconds() // 3600)
+    time = cycle_hour
 
-    # Use cached file if available and not forcing refresh
+    # If step is not valid, use previous cycle and step 0
+    if step not in valid_cycles:
+        idx = valid_cycles.index(cycle_hour)
+        if idx > 0:
+            cycle_hour = valid_cycles[idx-1]
+            cycle_dt = dt.replace(
+                hour=cycle_hour, minute=0, second=0, microsecond=0)
+            step = int((dt - cycle_dt).total_seconds() // 3600)
+            time = cycle_hour
+            pass
+        else:
+            pass
+            step = 0
+            cycle_dt = dt.replace(
+                hour=valid_cycles[0], minute=0, second=0, microsecond=0)
+            time = valid_cycles[0]
+
+    # O cache é sempre por ciclo/step do timestamp solicitado
+    cycle_str = cycle_dt.strftime('%Y%m%d')
+    cache_path = os.path.join(
+        "static", "grib", f"{param}_{cycle_str}{time:02d}_{step}.grib2")
+
+    # Requested param, time_param, file_path, cache_path, force
+
+    # Use cache file if available and not forcing download
     if os.path.exists(cache_path) and not force:
-        print(f"[CACHE] Using cached GRIB file: {cache_path}")
+        # Using cached GRIB file
         ds = xr.open_dataset(cache_path, engine="cfgrib")
         data = ds[param] if param in ds else ds[list(ds.data_vars)[0]]
-
-        # Ensure time dimension exists
         if "time" not in data.dims:
             data = data.expand_dims("time")
-
-        print(f"[CACHE] GRIB file loaded from cache.")
+    # GRIB file loaded from cache
         return data.isel(time=0)
 
-    # Download fresh data from ECMWF
-    print(f"[DOWNLOAD] Downloading GRIB file from ECMWF: {cache_path}")
+    # Calculate time and step for ECMWF client
+    dt = datetime.strptime(time_param, "%Y%m%d%H")
+    valid_cycles = [0, 6, 12, 18]
+    cycle_hour = max([h for h in valid_cycles if h <= dt.hour], default=None)
+    if cycle_hour is None:
+        raise HTTPException(
+            status_code=400, detail=f"No valid ECMWF cycle for hour {dt.hour}")
+    cycle_dt = dt.replace(hour=cycle_hour)
+    step = int((dt - cycle_dt).total_seconds() // 3600)
+    time = cycle_hour
 
-    # Remove existing index file to avoid conflicts
-    idx_file = cache_path + ".idx"
-    if os.path.exists(idx_file):
-        os.remove(idx_file)
+    # If step is not valid, use previous cycle and step 0
+    if step not in valid_cycles:
+        idx = valid_cycles.index(cycle_hour)
+        if idx > 0:
+            cycle_hour = valid_cycles[idx-1]
+            cycle_dt = dt.replace(hour=cycle_hour)
+            step = int((dt - cycle_dt).total_seconds() // 3600)
+            time = cycle_hour
+        else:
+            step = 0
+            cycle_dt = dt.replace(hour=valid_cycles[0])
+            time = valid_cycles[0]
 
-    # Download using ECMWF OpenData client
-    client = Client(source="ecmwf")
-    client.retrieve(
-        time=0,
-        stream="oper",
-        type="fc",
-        step=24,
-        param=param,
-        target=cache_path
-    )
+    # Validations
+    now = datetime.utcnow()
+    ciclo_futuro = dt > now
+    if step < 0:
+        step = 0
+    # ECMWF only accepts steps multiple of 3
+    if step % 3 != 0:
+        step = step - (step % 3)
+    if step > 240:
+        raise HTTPException(
+            status_code=400, detail=f"Step {step}h out of ECMWF range (max 240h)")
 
-    print(f"[DOWNLOAD] Download complete: {cache_path}")
+    def try_retrieve(step_value):
+        try:
+            if ciclo_futuro:
+                # If future timestamp, get latest ECMWF cycle and adjust step
+                client = Client(source="ecmwf")
+                result = client.retrieve(
+                    time=time,
+                    type="fc",
+                    stream="oper",
+                    step=0,
+                    param=param,
+                    target=cache_path
+                )
+                ciclo_real = result.datetime
+                step_corrigido = int((dt - ciclo_real).total_seconds() // 3600)
+                if step_corrigido < 0:
+                    return False
+                client.retrieve(
+                    time=time,
+                    type="fc",
+                    stream="oper",
+                    step=step_corrigido,
+                    param=param,
+                    target=cache_path
+                )
+            else:
+                idx_file = cache_path + ".idx"
+                if os.path.exists(idx_file):
+                    os.remove(idx_file)
+                client = Client(source="ecmwf")
+                client.retrieve(
+                    date=cycle_dt.strftime('%Y%m%d'),
+                    time=time,
+                    type="fc",
+                    stream="oper",
+                    step=step_value,
+                    param=param,
+                    target=cache_path
+                )
+            return True
+        except Exception as e:
+            import requests
+            if hasattr(e, 'response') and isinstance(e.response, requests.Response) and e.response.status_code == 404:
+                return False
+            else:
+                raise
 
-    # Load and process the downloaded data
+    # Try requested step, then previous valid steps
+    fallback_steps = [step] + [s for s in range(step-3, -1, -3) if s >= 0]
+    found = False
+    for s in fallback_steps:
+        if try_retrieve(s):
+            found = True
+            break
+    if not found:
+        raise HTTPException(
+            status_code=404, detail=f"No ECMWF data for cycle={cycle_dt}, param={param}, steps={fallback_steps}")
     ds = xr.open_dataset(cache_path, engine="cfgrib")
     data = ds[param] if param in ds else ds[list(ds.data_vars)[0]]
-
-    # Ensure time dimension exists
     if "time" not in data.dims:
         data = data.expand_dims("time")
-
-    print(f"[PROCESS] GRIB file loaded and processed.")
     return data.isel(time=0)
 
 # ===============================
@@ -150,33 +245,33 @@ def download_grib(file_path: str, param: str, force: bool = False) -> xr.DataArr
 
 
 def apply_palette_to_data_vectorized(data_array: np.ndarray, palette: list) -> np.ndarray:
-    # Sort palette by data values and extract components
+    # Sort palette and get color levels
     sorted_palette = sorted(palette, key=lambda x: x[0])
     levels, colors = zip(*sorted_palette)
     levels = np.array(levels)
     colors = np.array(colors)[:, :3]
 
-    # Initialize RGB output array
+    # Create RGB output array
     rgb_array = np.zeros((*data_array.shape, 3), dtype=np.uint8)
 
     # Clip data to palette range
     data_clipped = np.clip(data_array, levels[0], levels[-1])
 
-    # Find interpolation indices for each data point
+    # Find color index for each data point
     idx = np.searchsorted(levels, data_clipped) - 1
     idx[idx < 0] = 0
 
-    # Get boundary values and colors for interpolation
+    # Get color boundaries for interpolation
     v1 = levels[idx]
     v2 = levels[idx + 1]
     c1 = colors[idx]
     c2 = colors[idx + 1]
 
-    # Linear interpolation between colors
+    # Interpolate colors
     ratio = np.expand_dims((data_clipped - v1) / (v2 - v1 + 1e-8), axis=-1)
     rgb_array = (c1 + ratio * (c2 - c1)).astype(np.uint8)
 
-    # Handle NaN values with gray color
+    # Set NaN values to gray
     rgb_array[np.isnan(data_array)] = [128, 128, 128]
 
     return rgb_array
@@ -192,52 +287,43 @@ def generate_isolines_geojson(array: np.ndarray, lat_coords=None, lon_coords=Non
     if interval <= 0:
         raise ValueError("Interval must be positive.")
 
-    # Validate input data
+    # Check input data
     valid_data = array[~np.isnan(array)]
     if len(valid_data) == 0:
         print("[ISOLINES] No valid data available for isoline generation.")
         return {"type": "FeatureCollection", "features": []}
 
-    # Skip uniform data (no contours possible)
+    # Skip if all data is the same
     if np.all(valid_data == valid_data[0]):
         print(
             f"[ISOLINES] Uniform data ({valid_data[0]}), no isolines to generate.")
         return {"type": "FeatureCollection", "features": []}
 
-    # Apply Gaussian smoothing for cleaner meteorological contours
+    # Smooth data for better contours
 
-    # Sigma values for smoothing
-    sigma = [3.0, 3.0]  # [lat_sigma, lon_sigma]
-    print(f"[ISOLINES] Applying Gaussian smoothing with sigma={sigma}")
-
-    # Apply Gaussian filter with constant boundary conditions
+    sigma = [3.0, 3.0]
     array = ndimage.gaussian_filter(array, sigma, mode='constant', cval=np.nan)
-    print("[ISOLINES] Gaussian smoothing applied successfully")
 
     # Calculate contour levels
     data_min, data_max = np.floor(
         np.min(valid_data)), np.ceil(np.max(valid_data))
-    print(
-        f"[ISOLINES] Data range: {data_min} to {data_max}, Interval: {interval}")
-
     levels = np.arange(
         np.floor(data_min / interval) * interval,
         np.ceil(data_max / interval) * interval + interval,
         interval
     )
-    print(f"[ISOLINES] Contour levels: {levels}")
 
-    # Set up coordinate system
+    # Set up coordinates
     height, width = array.shape
     if lat_coords is None:
         lat_coords = np.linspace(-90, 90, height)
     if lon_coords is None:
         lon_coords = np.linspace(-180, 180, width)
 
-    # Create coordinate meshgrid
+    # Create meshgrid
     lon_grid, lat_grid = np.meshgrid(lon_coords, lat_coords)
 
-    # Generate contours using matplotlib
+    # Generate contours
     figure = plt.figure(figsize=(12, 8))
     ax = figure.add_subplot(111)
 
@@ -246,7 +332,7 @@ def generate_isolines_geojson(array: np.ndarray, lat_coords=None, lon_coords=Non
         contourf = ax.contourf(lon_grid, lat_grid, array,
                                levels=levels, extend='both')
 
-        # Convert matplotlib contours to GeoJSON
+    # Convert contours to GeoJSON
         geojson_str = geojsoncontour.contourf_to_geojson(
             contourf=contourf,
             ndigits=ndigits,
@@ -256,12 +342,12 @@ def generate_isolines_geojson(array: np.ndarray, lat_coords=None, lon_coords=Non
         )
 
     except Exception as e:
-        print(f"[ISOLINES] Error generating contours: {e}")
+        # Error generating contours
         return {"type": "FeatureCollection", "features": []}
     finally:
         plt.close(figure)
 
-    # Process GeoJSON to extract line features
+    # Process GeoJSON to get line features
     try:
         geo = json.loads(geojson_str)
         line_features = []
@@ -293,11 +379,11 @@ def generate_isolines_geojson(array: np.ndarray, lat_coords=None, lon_coords=Non
                 print(
                     f"[ISOLINES] Skipping unsupported geometry type: {geom.geom_type}")
 
-        print(f"[ISOLINES] Generated {len(line_features)} isoline features")
+    # Isoline features generated
         return {"type": "FeatureCollection", "features": line_features}
 
     except Exception as e:
-        print(f"[ISOLINES] Error processing GeoJSON: {e}")
+        # Error processing GeoJSON
         return {"type": "FeatureCollection", "features": []}
 
 
@@ -316,14 +402,16 @@ def create_line_feature(line_geom, level_value):
 # ===============================
 # ENDPOINT FACTORY FUNCTIONS
 # ===============================
+
+
 def create_webp_endpoint(file_path, param, palette):
     def endpoint(time_param: str, force: bool = False):
         """
-        Returns a weather map as a WebP image for the given theme and timestamp.
-        If the theme is wind, combines U and V components into a colorized wind speed map.
-        Parameters:
-            time_param (str): UTC timestamp in YYYYMMDDHH format
-            force (bool): If True, forces regeneration of the image
+        Get weather map as WebP image for theme and time.
+        For wind, combines U and V to show wind speed.
+        Args:
+            time_param (str): UTC time YYYYMMDDHH
+            force (bool): If True, make new image
         Returns:
             WebP image file
         """
@@ -332,13 +420,10 @@ def create_webp_endpoint(file_path, param, palette):
         if isinstance(param, list) and len(param) == 2:
             webp_path = os.path.join("static", f"wind_{time_param}_rgb.webp")
             if os.path.exists(webp_path) and not force:
-                print(f"[CACHE] Using cached WebP: {webp_path}")
                 return FileResponse(webp_path, media_type="image/webp")
-
-            print(f"[PROCESS] Generating new VECTOR WebP: {webp_path}")
             # Download U and V
-            u_data = download_grib(file_path[0], param[0], force)
-            v_data = download_grib(file_path[1], param[1], force)
+            u_data = download_grib(file_path[0], param[0], force, time_param)
+            v_data = download_grib(file_path[1], param[1], force, time_param)
             u = np.nan_to_num(u_data.values)
             v = np.nan_to_num(v_data.values)
             mod = np.sqrt(u**2 + v**2)
@@ -346,33 +431,31 @@ def create_webp_endpoint(file_path, param, palette):
             rgb_array = apply_palette_to_data_vectorized(mod, palette)
             img = Image.fromarray(rgb_array.astype(np.uint8), mode='RGB')
             img.save(webp_path, format="WEBP", quality=95, method=6)
-            print(f"[PROCESS] VECTOR WebP file generated: {webp_path}")
+            # VECTOR WebP file generated
             return FileResponse(webp_path, media_type="image/webp")
         else:
             webp_path = os.path.join(
                 "static", f"{param}_{time_param}_rgb.webp")
             if os.path.exists(webp_path) and not force:
-                print(f"[CACHE] Using cached WebP: {webp_path}")
                 return FileResponse(webp_path, media_type="image/webp")
-
-            print(f"[PROCESS] Generating new WebP: {webp_path}")
-            data = download_grib(file_path, param, force)
+            data = download_grib(file_path, param, force, time_param)
             array = np.nan_to_num(data.values, nan=np.nanmean(data.values))
             rgb_array = apply_palette_to_data_vectorized(array, palette)
             img = Image.fromarray(rgb_array.astype(np.uint8), mode='RGB')
             img.save(webp_path, format="WEBP", quality=95, method=6)
-            print(f"[PROCESS] WebP file generated: {webp_path}")
+            # WebP file generated
             return FileResponse(webp_path, media_type="image/webp")
     return endpoint
+
 
 def create_isolines_endpoint(file_path: str, param: str):
     def endpoint(time_param: str, force: bool = False, background_tasks: BackgroundTasks = None, request: Request = None):
         """
-        Returns GeoJSON isolines for mean sea level pressure for the given timestamp.
-        If accessed from Swagger UI, returns only a sample (10 features) for preview.
-        Parameters:
-            time_param (str): UTC timestamp in YYYYMMDDHH format
-            force (bool): If True, forces regeneration of the isolines
+        Get GeoJSON isolines for mean sea level pressure and time.
+        If Swagger UI, show only 10 features for preview.
+        Args:
+            time_param (str): UTC time YYYYMMDDHH
+            force (bool): If True, make new isolines
         Returns:
             GeoJSON file or sample dict
         """
@@ -431,6 +514,8 @@ def create_isolines_endpoint(file_path: str, param: str):
 # ===============================
 # WIND TEXTURE PROCESSING
 # ===============================
+
+
 def create_wind_texture(u_data: np.ndarray, v_data: np.ndarray, output_size=(512, 512)) -> Image.Image:
     """
     Creates a wind texture from U/V components for WebGL particle system.
@@ -440,118 +525,132 @@ def create_wind_texture(u_data: np.ndarray, v_data: np.ndarray, output_size=(512
     """
     # Resize data to texture dimensions
     from scipy.ndimage import zoom
-    
+
     original_shape = u_data.shape
-    zoom_factors = (output_size[0] / original_shape[0], output_size[1] / original_shape[1])
-    
+    zoom_factors = (output_size[1] / original_shape[0],
+                    output_size[0] / original_shape[1])
+
     u_resized = zoom(u_data, zoom_factors, order=1)
     v_resized = zoom(v_data, zoom_factors, order=1)
-    
+
     # Calculate wind speed magnitude
     speed = np.sqrt(u_resized**2 + v_resized**2)
-    
+
     # Normalize components to 0-255 range
     # Assuming wind components range from -50 to +50 m/s
-    u_normalized = np.clip((u_resized + 50) / 100 * 255, 0, 255).astype(np.uint8)
-    v_normalized = np.clip((v_resized + 50) / 100 * 255, 0, 255).astype(np.uint8)
-    
+    u_normalized = np.clip((u_resized + 50) / 100 *
+                           255, 0, 255).astype(np.uint8)
+    v_normalized = np.clip((v_resized + 50) / 100 *
+                           255, 0, 255).astype(np.uint8)
+
     # Normalize speed to 0-255 (assuming max speed ~70 m/s)
     speed_normalized = np.clip(speed / 70 * 255, 0, 255).astype(np.uint8)
-    
+
     # Create RGB texture
-    texture_array = np.stack([u_normalized, v_normalized, speed_normalized], axis=-1)
-    
+    texture_array = np.stack(
+        [u_normalized, v_normalized, speed_normalized], axis=-1)
+
     return Image.fromarray(texture_array, mode='RGB')
+
 
 def create_wind_texture_endpoint(file_paths: list, params: list):
     """Factory function for wind texture endpoint"""
-    def endpoint(time_param: str, force: bool = False, size: int = 512):
+    def endpoint(time_param: str, force: bool = False, width: int = 360, height: int = 180):
         """
-        Returns wind data as RGB texture for WebGL particle system.
-        R = U component, G = V component, B = Wind speed magnitude
-        
-        Parameters:
-            time_param (str): UTC timestamp in YYYYMMDDHH format  
-            force (bool): If True, forces regeneration
-            size (int): Texture size (default 512x512)
+        Get wind data as RGB texture for WebGL.
+        R = U, G = V, B = wind speed.
+        Args:
+            time_param (str): UTC time YYYYMMDDHH
+            force (bool): If True, make new texture
+            width (int): Texture width
+            height (int): Texture height
         Returns:
-            PNG image file with wind data encoded in RGB channels
+            PNG image file with wind data
         """
         parse_time_param(time_param)
-        
+
         # Cache path for wind texture
-        texture_path = os.path.join("static", f"wind_texture_{time_param}_{size}.png")
-        
+        texture_path = os.path.join(
+            "static", f"wind_texture_{time_param}_{width}x{height}.png")
+
         if os.path.exists(texture_path) and not force:
-            print(f"[CACHE] Using cached wind texture: {texture_path}")
             return FileResponse(texture_path, media_type="image/png")
-        
-        print(f"[PROCESS] Generating new wind texture: {texture_path}")
-        
+
         # Download U and V components
-        u_data = download_grib(file_paths[0], params[0], force)
-        v_data = download_grib(file_paths[1], params[1], force)
-        
+        u_data = download_grib(file_paths[0], params[0], force, time_param)
+        v_data = download_grib(file_paths[1], params[1], force, time_param)
+
         # Extract numpy arrays
         u_array = np.nan_to_num(u_data.values, nan=0)
         v_array = np.nan_to_num(v_data.values, nan=0)
-        
+
         # Create wind texture
-        texture_img = create_wind_texture(u_array, v_array, (size, size))
-        
+        texture_img = create_wind_texture(
+            u_array, v_array, output_size=(width, height))
+
         # Save texture
         texture_img.save(texture_path, format="PNG", optimize=True)
-        
-        print(f"[PROCESS] Wind texture generated: {texture_path}")
+
+    # Wind texture generated
         return FileResponse(texture_path, media_type="image/png")
-    
+
     return endpoint
+
 
 def create_info_endpoint(file_path: str, param: str, units: str):
     def endpoint(time_param: str, force: bool = False):
         """
-        Returns metadata and statistics for the selected weather parameter and timestamp.
-        Includes value range, mean, standard deviation, spatial bounds, and grid resolution.
-        Parameters:
-            time_param (str): UTC timestamp in YYYYMMDDHH format
-            force (bool): If True, forces data refresh
-        Returns:
-            JSON dict with statistics and metadata
+        Get metadata and statistics for weather parameter and time.
+        Shows value range, mean, std, bounds, resolution.
+        For wind, also shows uMin, uMax, vMin, vMax.
         """
-        # Validate timestamp
         parse_time_param(time_param)
 
-        # Load weather data
-        data = download_grib(file_path, param, force)
-
-        # Extract coordinate information
-        lat_coords = data.coords.get('latitude', data.coords.get('lat'))
-        lon_coords = data.coords.get('longitude', data.coords.get('lon'))
+        # Handle wind (vector) layers
+        if isinstance(param, list) and len(param) == 2:
+            # Download U and V components
+            u_data = download_grib(file_path[0], param[0], force, time_param)
+            v_data = download_grib(file_path[1], param[1], force, time_param)
+            u = np.nan_to_num(u_data.values)
+            v = np.nan_to_num(v_data.values)
+            values = np.sqrt(u**2 + v**2)  # Wind speed modulus
+            # Use U's coordinates for bounds
+            lat_coords = u_data.coords.get(
+                'latitude', u_data.coords.get('lat'))
+            lon_coords = u_data.coords.get(
+                'longitude', u_data.coords.get('lon'))
+            # Calculate U/V min/max
+            uMin = float(np.min(u))
+            uMax = float(np.max(u))
+            vMin = float(np.min(v))
+            vMax = float(np.max(v))
+        else:
+            # Scalar layer
+            data = download_grib(file_path, param, force)
+            values = np.nan_to_num(data.values, nan=np.nanmean(
+                data.values), time_param=time_param)
+            lat_coords = data.coords.get('latitude', data.coords.get('lat'))
+            lon_coords = data.coords.get('longitude', data.coords.get('lon'))
+            uMin = uMax = vMin = vMax = None
 
         # Calculate spatial bounds and resolution
-        bounds = [-180, -90, 180, 90]  # Default global bounds
-        resolution = {"lat": 0.25, "lon": 0.25}  # Default ECMWF resolution
-
+        bounds = [-180, -90, 180, 90]
+        resolution = {"lat": 0.25, "lon": 0.25}
         if lat_coords is not None and lon_coords is not None:
             lat_values, lon_values = lat_coords.values, lon_coords.values
-            bounds = [
-                float(lon_values.min()), float(lat_values.min()),
-                float(lon_values.max()), float(lat_values.max())
-            ]
-
-            # Calculate actual resolution
+            bounds = [float(lon_values.min()), float(lat_values.min()), float(
+                lon_values.max()), float(lat_values.max())]
             if len(lat_values) > 1:
                 resolution["lat"] = float(abs(lat_values[1] - lat_values[0]))
             if len(lon_values) > 1:
                 resolution["lon"] = float(abs(lon_values[1] - lon_values[0]))
 
         # Calculate data statistics
-        values = data.values
         valid_values = values[~np.isnan(values)]
         data_min, data_max = float(
             np.min(valid_values)), float(np.max(valid_values))
 
-        return {
+        result = {
             "parameter": param,
             "units": units,
             "timestamp": time_param,
@@ -562,11 +661,21 @@ def create_info_endpoint(file_path: str, param: str, units: str):
                 "std_deviation": float(np.std(valid_values))
             },
             "spatial_info": {
-                "data_shape": list(data.shape),
+                "data_shape": list(values.shape),
                 "bounds": bounds,
                 "resolution": resolution
             },
         }
+        # Add U/V min/max for wind
+        if uMin is not None:
+            result["uMin"] = uMin
+        if uMax is not None:
+            result["uMax"] = uMax
+        if vMin is not None:
+            result["vMin"] = vMin
+        if vMax is not None:
+            result["vMax"] = vMax
+        return result
 
     return endpoint
 
@@ -575,6 +684,7 @@ def create_info_endpoint(file_path: str, param: str, units: str):
 # ===============================
 
 # Register endpoints for each weather theme
+
 
 for theme, cfg in themes.items():
     # WebP weather map endpoint

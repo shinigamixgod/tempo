@@ -64,7 +64,7 @@ Replace `{timestamp}` with something like `2025091312` (YYYYMMDDHH)
 
 ### Temperature
 
-![Temperature Map](temperature.png)
+![Temperature Map](/demo/temperature.png)
 
 ```js
 import { BitmapLayer } from "@deck.gl/layers";
@@ -85,7 +85,7 @@ deckOverlay.setProps({ layers: [temperatureLayer] });
 
 ### Mean Sea Level Pressure
 
-![Mean Sea Level Pressure Map](mean_sea_level_pressure.png)
+![Mean Sea Level Pressure Map](/demo/mean_sea_level_pressure.png)
 
 ```js
 import { BitmapLayer, GeoJsonLayer } from "@deck.gl/layers";
@@ -116,7 +116,7 @@ deckOverlay.setProps({ layers: [mslLayer, isolinesLayer] });
 
 ### Total Precipitation
 
-![Total Precipitation Map](total_precipitation.png)
+![Total Precipitation Map](/demo/total_precipitation.png)
 
 ```js
 import { BitmapLayer } from "@deck.gl/layers";
@@ -137,7 +137,7 @@ deckOverlay.setProps({ layers: [precipLayer] });
 
 ### Wind
 
-![Wind Map](wind.png)
+![Wind Map](/demo/wind.png)
 
 ```js
 import { BitmapLayer } from "@deck.gl/layers";
