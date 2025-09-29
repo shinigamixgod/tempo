@@ -1,6 +1,5 @@
 {
   "temperature": {
-    "file": "temp_2m.grib2",
     "variable": "2t",
     "palette": [
       [233, [162, 70, 145, 255]],
@@ -19,7 +18,6 @@
     "imageType": "SCALAR"
   },
   "mean_sea_level_pressure": {
-    "file": "temp_msl.grib2",
     "variable": "msl",
     "palette": [
       [90000, [8, 16, 48, 255]],
@@ -43,7 +41,6 @@
     "imageType": "SCALAR"
   },
   "total_precipitation": {
-    "file": "total_precip.grib2",
     "variable": "tp",
     "palette": [
       [0.0, [97, 97, 97, 255]],
@@ -62,7 +59,6 @@
     "imageType": "SCALAR"
   },
   "wind": {
-    "file": ["wind_10u.grib2", "wind_10v.grib2"],
     "variable": ["10u", "10v"],
     "palette": [
       [0, [98, 113, 183, 255]],

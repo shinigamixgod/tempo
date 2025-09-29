@@ -1,46 +1,50 @@
-# =========================================
-# Tempo API v1.0.0
-# =========================================
+"""
+Tempo API v1.0.0
+Weather data visualization and analysis API using ECMWF OpenData.
+Provides WebP maps, GeoJSON isolines, byte arrays for WebGL, and metadata endpoints.
+"""
 
-# ===============================
-# IMPORTS AND DEPENDENCIES
-# ===============================
-
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse, RedirectResponse
-from ecmwf.opendata import Client
-import xarray as xr
-import numpy as np
-from PIL import Image
-from datetime import datetime, timedelta
-import os
-import json
-import glob
-import re
-import time
-import matplotlib.pyplot as plt
-import geojsoncontour
-from shapely.geometry import shape, LineString
-from scipy import ndimage
+from fastapi import HTTPException
 import shapely
+from scipy.ndimage import zoom
+from scipy import ndimage
+from shapely.geometry import shape, LineString
+import geojsoncontour
+import matplotlib.pyplot as plt
+import time
+import glob
+import json
+import os
+from datetime import datetime, timedelta
+from PIL import Image
+import numpy as np
+import xarray as xr
+from ecmwf.opendata import Client
+from fastapi.responses import FileResponse, RedirectResponse
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+import warnings
+warnings.filterwarnings('ignore', category=FutureWarning, module='cfgrib')
 
-# ===============================
+# =========================================
+# IMPORTS AND DEPENDENCIES
+# =========================================
+
+
+# =========================================
 # APPLICATION INITIALIZATION
-# ===============================
+# =========================================
 
 app = FastAPI(
     title="Tempo API",
     version="1.0.0",
     description="""
-Tempo API provides weather data visualization and analysis endpoints, including:
+Tempo API provides weather data visualization and analysis endpoints:
 - WebP weather maps for various meteorological parameters
 - GeoJSON isolines for mean sea level pressure
+- Byte arrays for WebGL particle systems
 - Data statistics and metadata endpoints
 
-All endpoints are designed for fast, automated weather data delivery. Data source: ECMWF OpenData (European Centre for Medium-Range Weather Forecasts).
-
-Endpoints are grouped by weather theme for easier navigation.
+Data source: ECMWF OpenData (European Centre for Medium-Range Weather Forecasts).
 """
 )
 
@@ -51,12 +55,20 @@ with open("themes.json") as f:
 # Ensure required directories exist
 os.makedirs("static/grib", exist_ok=True)
 
-# ===============================
+# =========================================
 # UTILITY FUNCTIONS
-# ===============================
+# =========================================
 
 
 def clean_old_cache(param: str, cache_dir: str = "static", max_age_hours: int = 24):
+    """
+    Remove cached files older than max_age_hours for a given parameter.
+
+    Args:
+        param: Weather parameter name
+        cache_dir: Directory containing cached files
+        max_age_hours: Maximum age in hours before deletion
+    """
     now = time.time()
     pattern = os.path.join(cache_dir, f"{param}_*_*.json")
 
@@ -72,26 +84,43 @@ def clean_old_cache(param: str, cache_dir: str = "static", max_age_hours: int = 
 
 
 def parse_time_param(time_str: str) -> datetime:
+    """
+    Parse and validate time parameter string.
+
+    Args:
+        time_str: Time string in format YYYYMMDDHH
+
+    Returns:
+        Validated datetime object
+
+    Raises:
+        HTTPException: If format invalid or timestamp out of range (-120h to +120h)
+    """
     try:
         ts = datetime.strptime(time_str, "%Y%m%d%H")
     except ValueError:
         raise HTTPException(
-            status_code=400, detail="Invalid time format: use YYYYMMDDHH")
+            status_code=400,
+            detail="Invalid time format: use YYYYMMDDHH"
+        )
 
-    # Allow a wider range: -120h to +120h from now
+    # Allow range: -120h to +120h from now
     now = datetime.utcnow()
     if not (now - timedelta(hours=120) <= ts <= now + timedelta(hours=120)):
         raise HTTPException(
-            status_code=400, detail="Timestamp out of allowed range (-120h to +120h)")
+            status_code=400,
+            detail="Timestamp out of allowed range (-120h to +120h)"
+        )
 
     return ts
 
-# ===============================
+
+# =========================================
 # GRIB DATA PROCESSING
-# ===============================
+# =========================================
 
 
-def download_grib(file_path: str, param: str, force: bool = False, time_param: str = None) -> xr.DataArray:
+def download_grib(param: str, use_cache: bool = True, time_param: str = None) -> xr.DataArray:
     # Get timestamp from time_param (always from request)
     # file_path is only the base name, not timestamp
     # time_param is always passed by endpoints
@@ -123,21 +152,25 @@ def download_grib(file_path: str, param: str, force: bool = False, time_param: s
                 hour=valid_cycles[0], minute=0, second=0, microsecond=0)
             time = valid_cycles[0]
 
+
     # O cache é sempre por ciclo/step do timestamp solicitado
     cycle_str = cycle_dt.strftime('%Y%m%d')
     cache_path = os.path.join(
         "static", "grib", f"{param}_{cycle_str}{time:02d}_{step}.grib2")
 
+    # Diagnostic print for debugging GRIB retrieval
+    print(f"[GRIB-LEGACY] param={param}, time_param={time_param}, cycle={cycle_str} hour={time}, step={step}, cache_path={cache_path}")
+
     # Requested param, time_param, file_path, cache_path, force
 
     # Use cache file if available and not forcing download
-    if os.path.exists(cache_path) and not force:
+    if os.path.exists(cache_path) and not use_cache:
         # Using cached GRIB file
         ds = xr.open_dataset(cache_path, engine="cfgrib")
         data = ds[param] if param in ds else ds[list(ds.data_vars)[0]]
         if "time" not in data.dims:
             data = data.expand_dims("time")
-    # GRIB file loaded from cache
+        # GRIB file loaded from cache
         return data.isel(time=0)
 
     # Calculate time and step for ECMWF client
@@ -239,17 +272,27 @@ def download_grib(file_path: str, param: str, force: bool = False, time_param: s
         data = data.expand_dims("time")
     return data.isel(time=0)
 
-# ===============================
-# IMAGE PROCESSING AND VISUALIZATION
-# ===============================
 
+# =========================================
+# IMAGE PROCESSING AND VISUALIZATION
+# =========================================
 
 def apply_palette_to_data_vectorized(data_array: np.ndarray, palette: list) -> np.ndarray:
-    # Sort palette and get color levels
+    """
+    Apply color palette to data array using vectorized interpolation.
+
+    Args:
+        data_array: 2D numpy array with data values
+        palette: List of [value, [R, G, B]] color stops
+
+    Returns:
+        3D RGB array with interpolated colors
+    """
+    # Sort palette by value and extract levels and colors
     sorted_palette = sorted(palette, key=lambda x: x[0])
     levels, colors = zip(*sorted_palette)
     levels = np.array(levels)
-    colors = np.array(colors)[:, :3]
+    colors = np.array(colors)[:, :3]  # RGB only
 
     # Create RGB output array
     rgb_array = np.zeros((*data_array.shape, 3), dtype=np.uint8)
@@ -267,7 +310,7 @@ def apply_palette_to_data_vectorized(data_array: np.ndarray, palette: list) -> n
     c1 = colors[idx]
     c2 = colors[idx + 1]
 
-    # Interpolate colors
+    # Linear interpolation between colors
     ratio = np.expand_dims((data_clipped - v1) / (v2 - v1 + 1e-8), axis=-1)
     rgb_array = (c1 + ratio * (c2 - c1)).astype(np.uint8)
 
@@ -276,31 +319,37 @@ def apply_palette_to_data_vectorized(data_array: np.ndarray, palette: list) -> n
 
     return rgb_array
 
-# ===============================
-# CONTOUR LINE GENERATION
-# ===============================
-
 
 def generate_isolines_geojson(array: np.ndarray, lat_coords=None, lon_coords=None,
-                              interval=2.0, ndigits=3, unit='m') -> dict:
+                              interval=2.0, ndigits=3, unit='hPa') -> dict:
+    """
+    Generate GeoJSON isolines from 2D data array.
+
+    Args:
+        array: 2D numpy array with data values
+        lat_coords: Latitude coordinate values
+        lon_coords: Longitude coordinate values
+        interval: Contour interval
+        ndigits: Number of decimal places for coordinates
+        unit: Unit of measurement for properties
+
+    Returns:
+        GeoJSON FeatureCollection with LineString features
+    """
     interval = float(interval)
     if interval <= 0:
         raise ValueError("Interval must be positive.")
 
-    # Check input data
+    # Check for valid data
     valid_data = array[~np.isnan(array)]
     if len(valid_data) == 0:
-        print("[ISOLINES] No valid data available for isoline generation.")
         return {"type": "FeatureCollection", "features": []}
 
-    # Skip if all data is the same
+    # Skip if all data is uniform
     if np.all(valid_data == valid_data[0]):
-        print(
-            f"[ISOLINES] Uniform data ({valid_data[0]}), no isolines to generate.")
         return {"type": "FeatureCollection", "features": []}
 
-    # Smooth data for better contours
-
+    # Apply Gaussian smoothing for better contours
     sigma = [3.0, 3.0]
     array = ndimage.gaussian_filter(array, sigma, mode='constant', cval=np.nan)
 
@@ -313,26 +362,24 @@ def generate_isolines_geojson(array: np.ndarray, lat_coords=None, lon_coords=Non
         interval
     )
 
-    # Set up coordinates
+    # Set up coordinate grids
     height, width = array.shape
     if lat_coords is None:
         lat_coords = np.linspace(-90, 90, height)
     if lon_coords is None:
         lon_coords = np.linspace(-180, 180, width)
 
-    # Create meshgrid
     lon_grid, lat_grid = np.meshgrid(lon_coords, lat_coords)
 
-    # Generate contours
+    # Generate contours using matplotlib
     figure = plt.figure(figsize=(12, 8))
     ax = figure.add_subplot(111)
 
     try:
-        # Create filled contour plot
         contourf = ax.contourf(lon_grid, lat_grid, array,
                                levels=levels, extend='both')
 
-    # Convert contours to GeoJSON
+        # Convert to GeoJSON
         geojson_str = geojsoncontour.contourf_to_geojson(
             contourf=contourf,
             ndigits=ndigits,
@@ -340,14 +387,12 @@ def generate_isolines_geojson(array: np.ndarray, lat_coords=None, lon_coords=Non
             stroke_width=1,
             fill_opacity=0
         )
-
-    except Exception as e:
-        # Error generating contours
+    except Exception:
         return {"type": "FeatureCollection", "features": []}
     finally:
         plt.close(figure)
 
-    # Process GeoJSON to get line features
+    # Process GeoJSON to extract line features
     try:
         geo = json.loads(geojson_str)
         line_features = []
@@ -356,7 +401,7 @@ def generate_isolines_geojson(array: np.ndarray, lat_coords=None, lon_coords=Non
             geom = shape(feature["geometry"])
             level_value = feature["properties"].get("level", None)
 
-            # Convert polygons and multipolygons to line strings
+            # Convert polygon boundaries to line strings
             if geom.geom_type == "Polygon":
                 line = LineString(geom.exterior.coords)
                 line = shapely.simplify(
@@ -375,19 +420,15 @@ def generate_isolines_geojson(array: np.ndarray, lat_coords=None, lon_coords=Non
                 line = shapely.simplify(
                     geom, tolerance=0.05, preserve_topology=True)
                 line_features.append(create_line_feature(line, level_value))
-            else:
-                print(
-                    f"[ISOLINES] Skipping unsupported geometry type: {geom.geom_type}")
 
-    # Isoline features generated
         return {"type": "FeatureCollection", "features": line_features}
 
-    except Exception as e:
-        # Error processing GeoJSON
+    except Exception:
         return {"type": "FeatureCollection", "features": []}
 
 
 def create_line_feature(line_geom, level_value):
+    """Create GeoJSON feature from LineString geometry."""
     return {
         "type": "Feature",
         "geometry": {
@@ -399,70 +440,173 @@ def create_line_feature(line_geom, level_value):
         }
     }
 
-# ===============================
+
+def create_byte_webp(u_data: np.ndarray, v_data: np.ndarray, output_size=(512, 512)) -> Image.Image:
+    """
+    Create byte WebP image from U/V wind components for WebGL particle systems.
+    R channel = U component (scaled and offset)
+    G channel = V component (scaled and offset) 
+    B channel = Wind speed magnitude
+
+    Args:
+        u_data: 2D array of U wind component
+        v_data: 2D array of V wind component
+        output_size: Output image dimensions (width, height)
+
+    Returns:
+        PIL Image with encoded wind data
+    """
+    # Resize data to target dimensions
+    original_shape = u_data.shape
+    zoom_factors = (output_size[1] / original_shape[0],
+                    output_size[0] / original_shape[1])
+
+    u_resized = zoom(u_data, zoom_factors, order=1)
+    v_resized = zoom(v_data, zoom_factors, order=1)
+
+    # Calculate wind speed magnitude
+    speed = np.sqrt(u_resized**2 + v_resized**2)
+
+    # Calculate dynamic range from actual data
+    u_min, u_max = np.min(u_resized), np.max(u_resized)
+    v_min, v_max = np.min(v_resized), np.max(v_resized)
+    range_max = max(abs(u_min), abs(u_max), abs(v_min), abs(v_max))
+
+    # Normalize U/V components to 0-255 range using dynamic range
+    u_normalized = np.clip((u_resized + range_max) /
+                           (2 * range_max) * 255, 0, 255).astype(np.uint8)
+    v_normalized = np.clip((v_resized + range_max) /
+                           (2 * range_max) * 255, 0, 255).astype(np.uint8)
+
+    # Normalize speed to 0-255 using dynamic max speed
+    speed_max = np.max(speed)
+    speed_normalized = np.clip(
+        speed / speed_max * 255, 0, 255).astype(np.uint8)
+
+    # Stack into RGB array
+    byte_array = np.stack(
+        [u_normalized, v_normalized, speed_normalized], axis=-1)
+
+    return Image.fromarray(byte_array, mode='RGB')
+
+
+# =========================================
 # ENDPOINT FACTORY FUNCTIONS
-# ===============================
+# =========================================
 
+def create_webp_endpoint(param, palette):
+    """
+    Factory function to create WebP image endpoint.
 
-def create_webp_endpoint(file_path, param, palette):
-    def endpoint(time_param: str, force: bool = False):
+    Args:
+        file_path: GRIB file path(s)
+        param: Weather parameter name(s)
+        palette: Color palette for visualization
+
+    Returns:
+        Endpoint function that serves WebP images
+    """
+    def endpoint(time_param: str, cache: bool = True, width: int = None, height: int = None):
         """
-        Get weather map as WebP image for theme and time.
-        For wind, combines U and V to show wind speed.
+        Get weather map as WebP image.
+
         Args:
-            time_param (str): UTC time YYYYMMDDHH
-            force (bool): If True, make new image
+            time_param: UTC time in format YYYYMMDDHH
+            cache: If True, use cached image if available
+            width: Output image width (optional, uses original if not specified)
+            height: Output image height (optional, uses original if not specified)
+
         Returns:
             WebP image file
         """
         parse_time_param(time_param)
-        # VECTOR theme: wind
+
+        # Build cache filename with dimensions
+        size_suffix = f"_{width}x{height}" if width and height else ""
+
+        # Handle vector data (wind with U and V components)
         if isinstance(param, list) and len(param) == 2:
-            webp_path = os.path.join("static", f"wind_{time_param}_rgb.webp")
-            if os.path.exists(webp_path) and not force:
+            webp_path = os.path.join(
+                "static", f"wind_{time_param}{size_suffix}_rgb.webp")
+
+            if os.path.exists(webp_path) and cache:
                 return FileResponse(webp_path, media_type="image/webp")
-            # Download U and V
-            u_data = download_grib(file_path[0], param[0], force, time_param)
-            v_data = download_grib(file_path[1], param[1], force, time_param)
+
+            # Download U and V components
+            u_data = download_grib(param[0], cache, time_param)
+            v_data = download_grib(param[1], cache, time_param)
+
+            # Calculate wind speed magnitude
             u = np.nan_to_num(u_data.values)
             v = np.nan_to_num(v_data.values)
-            mod = np.sqrt(u**2 + v**2)
-            # Apply palette to wind speed (modulus)
-            rgb_array = apply_palette_to_data_vectorized(mod, palette)
+            wind_speed = np.sqrt(u**2 + v**2)
+
+            # Apply color palette to wind speed
+            rgb_array = apply_palette_to_data_vectorized(wind_speed, palette)
             img = Image.fromarray(rgb_array.astype(np.uint8), mode='RGB')
+
+            # Resize if dimensions specified
+            if width and height:
+                img = img.resize((width, height), Image.LANCZOS)
+
             img.save(webp_path, format="WEBP", quality=95, method=6)
-            # VECTOR WebP file generated
             return FileResponse(webp_path, media_type="image/webp")
+
+        # Handle scalar data
         else:
             webp_path = os.path.join(
-                "static", f"{param}_{time_param}_rgb.webp")
-            if os.path.exists(webp_path) and not force:
+                "static", f"{param}_{time_param}{size_suffix}_rgb.webp")
+
+            if os.path.exists(webp_path) and cache:
                 return FileResponse(webp_path, media_type="image/webp")
-            data = download_grib(file_path, param, force, time_param)
+
+            # Download data
+            data = download_grib(param, cache, time_param)
             array = np.nan_to_num(data.values, nan=np.nanmean(data.values))
+
+            # Se for precipitação, converte para mm e aplica log
             rgb_array = apply_palette_to_data_vectorized(array, palette)
             img = Image.fromarray(rgb_array.astype(np.uint8), mode='RGB')
+
+            # Resize if dimensions specified
+            if width and height:
+                img = img.resize((width, height), Image.LANCZOS)
+
             img.save(webp_path, format="WEBP", quality=95, method=6)
-            # WebP file generated
             return FileResponse(webp_path, media_type="image/webp")
+
     return endpoint
 
 
-def create_isolines_endpoint(file_path: str, param: str):
-    def endpoint(time_param: str, force: bool = False, background_tasks: BackgroundTasks = None, request: Request = None):
+def create_isolines_endpoint(param: str):
+    """
+    Factory function to create GeoJSON isolines endpoint.
+
+    Args:
+        file_path: GRIB file path
+        param: Weather parameter name
+
+    Returns:
+        Endpoint function that serves GeoJSON isolines
+    """
+    def endpoint(time_param: str, cache: bool = True, background_tasks: BackgroundTasks = None, request: Request = None):
         """
-        Get GeoJSON isolines for mean sea level pressure and time.
-        If Swagger UI, show only 10 features for preview.
+        Get GeoJSON isolines for mean sea level pressure.
+
         Args:
-            time_param (str): UTC time YYYYMMDDHH
-            force (bool): If True, make new isolines
+            time_param: UTC time in format YYYYMMDDHH
+            cache: If True, use cached GeoJSON if available
+
         Returns:
-            GeoJSON file or sample dict
+            GeoJSON FeatureCollection (preview in Swagger, full file otherwise)
         """
         parse_time_param(time_param)
-        data = download_grib(file_path, param, force)
+
+        # Download data
+        data = download_grib(param, cache, time_param)
         array = np.nan_to_num(data.values, nan=np.nanmean(data.values))
 
+        # Calculate appropriate contour interval
         valid_values = array[~np.isnan(array)]
         data_min = float(np.min(valid_values))
         data_max = float(np.max(valid_values))
@@ -471,14 +615,17 @@ def create_isolines_endpoint(file_path: str, param: str):
         geojson_path = os.path.join(
             "static", f"{param}_{time_param}_{suggested_interval}_isolines.json")
 
+        # Schedule cache cleanup
         if background_tasks:
             background_tasks.add_task(clean_old_cache, param)
 
-        # Verificar se é Swagger UI
+        # Check if request is from Swagger UI
         is_swagger = request and "/docs" in request.headers.get("referer", "")
 
-        if os.path.exists(geojson_path) and not force:
+        # Return cached file if available
+        if os.path.exists(geojson_path) and cache:
             if is_swagger:
+                # Return preview for Swagger (first 10 features)
                 with open(geojson_path, 'r') as f:
                     full_data = json.load(f)
                 return {
@@ -488,15 +635,17 @@ def create_isolines_endpoint(file_path: str, param: str):
                 }
             return FileResponse(geojson_path, media_type="application/json")
 
-        # Gerar novos isolines
+        # Generate new isolines
         lat_coords = data.coords.get('latitude', data.coords.get('lat'))
         lon_coords = data.coords.get('longitude', data.coords.get('lon'))
         lat_values = lat_coords.values if lat_coords is not None else None
         lon_values = lon_coords.values if lon_coords is not None else None
 
         geojson_data = generate_isolines_geojson(
-            array, lat_values, lon_values, suggested_interval)
+            array, lat_values, lon_values, suggested_interval
+        )
 
+        # Save to cache
         with open(geojson_path, 'w') as f:
             json.dump(geojson_data, f, indent=2)
 
@@ -511,135 +660,140 @@ def create_isolines_endpoint(file_path: str, param: str):
 
     return endpoint
 
-# ===============================
-# WIND TEXTURE PROCESSING
-# ===============================
 
-
-def create_wind_texture(u_data: np.ndarray, v_data: np.ndarray, output_size=(512, 512)) -> Image.Image:
+def create_byte_endpoint(params: list):
     """
-    Creates a wind texture from U/V components for WebGL particle system.
-    R channel = U component (scaled and offset)
-    G channel = V component (scaled and offset) 
-    B channel = Wind speed magnitude
+    Factory function to create byte array WebP endpoint for WebGL.
+    Suporta vetorial (U/V) e escalar (1 parâmetro).
     """
-    # Resize data to texture dimensions
-    from scipy.ndimage import zoom
-
-    original_shape = u_data.shape
-    zoom_factors = (output_size[1] / original_shape[0],
-                    output_size[0] / original_shape[1])
-
-    u_resized = zoom(u_data, zoom_factors, order=1)
-    v_resized = zoom(v_data, zoom_factors, order=1)
-
-    # Calculate wind speed magnitude
-    speed = np.sqrt(u_resized**2 + v_resized**2)
-
-    # Normalize components to 0-255 range
-    # Assuming wind components range from -50 to +50 m/s
-    u_normalized = np.clip((u_resized + 50) / 100 *
-                           255, 0, 255).astype(np.uint8)
-    v_normalized = np.clip((v_resized + 50) / 100 *
-                           255, 0, 255).astype(np.uint8)
-
-    # Normalize speed to 0-255 (assuming max speed ~70 m/s)
-    speed_normalized = np.clip(speed / 70 * 255, 0, 255).astype(np.uint8)
-
-    # Create RGB texture
-    texture_array = np.stack(
-        [u_normalized, v_normalized, speed_normalized], axis=-1)
-
-    return Image.fromarray(texture_array, mode='RGB')
-
-
-def create_wind_texture_endpoint(file_paths: list, params: list):
-    """Factory function for wind texture endpoint"""
-    def endpoint(time_param: str, force: bool = False, width: int = 360, height: int = 180):
-        """
-        Get wind data as RGB texture for WebGL.
-        R = U, G = V, B = wind speed.
-        Args:
-            time_param (str): UTC time YYYYMMDDHH
-            force (bool): If True, make new texture
-            width (int): Texture width
-            height (int): Texture height
-        Returns:
-            PNG image file with wind data
-        """
+    def endpoint(time_param: str, cache: bool = True, width: int = 360, height: int = 180):
         parse_time_param(time_param)
 
-        # Cache path for wind texture
-        texture_path = os.path.join(
-            "static", f"wind_texture_{time_param}_{width}x{height}.png")
-
-        if os.path.exists(texture_path) and not force:
-            return FileResponse(texture_path, media_type="image/png")
-
-        # Download U and V components
-        u_data = download_grib(file_paths[0], params[0], force, time_param)
-        v_data = download_grib(file_paths[1], params[1], force, time_param)
-
-        # Extract numpy arrays
-        u_array = np.nan_to_num(u_data.values, nan=0)
-        v_array = np.nan_to_num(v_data.values, nan=0)
-
-        # Create wind texture
-        texture_img = create_wind_texture(
-            u_array, v_array, output_size=(width, height))
-
-        # Save texture
-        texture_img.save(texture_path, format="PNG", optimize=True)
-
-    # Wind texture generated
-        return FileResponse(texture_path, media_type="image/png")
-
+        # Vetorial (ex: wind)
+        if isinstance(params, list) and len(params) == 2:
+            byte_array_path = os.path.join(
+                "static", f"{params[0]}_{params[1]}_byte_array_{time_param}_{width}x{height}.webp")
+            if os.path.exists(byte_array_path) and cache:
+                return FileResponse(byte_array_path, media_type="image/webp")
+            u_data = download_grib(params[0], cache, time_param)
+            v_data = download_grib(params[1], cache, time_param)
+            u_array = np.nan_to_num(u_data.values, nan=0)
+            v_array = np.nan_to_num(v_data.values, nan=0)
+            byte_webp = create_byte_webp(
+                u_array, v_array, output_size=(width, height))
+            byte_webp.save(byte_array_path, format="WEBP", optimize=True)
+            return FileResponse(byte_array_path, media_type="image/webp")
+        # Escalar
+        else:
+            byte_array_path = os.path.join(
+                "static", f"{params}_byte_array_{time_param}_{width}x{height}.webp")
+            if os.path.exists(byte_array_path) and cache:
+                return FileResponse(byte_array_path, media_type="image/webp")
+            data = download_grib(params, cache, time_param)
+            array = np.nan_to_num(data.values, nan=np.nanmean(data.values))
+            # Se for precipitação, converte para mm e aplica log
+            if params == "tp":
+                array_mm = array * 1000.0
+                arr_resized = zoom(
+                    array_mm, (height / array_mm.shape[0], width / array_mm.shape[1]), order=1)
+                arr_log = np.log1p(arr_resized)
+                arr_min, arr_max = np.min(arr_log), np.max(arr_log)
+                if arr_max - arr_min < 1e-6:
+                    arr_norm = np.zeros_like(arr_log, dtype=np.uint8)
+                else:
+                    arr_norm = np.clip(
+                        (arr_log - arr_min) / (arr_max - arr_min) * 255, 0, 255).astype(np.uint8)
+            else:
+                # Resize para output_size
+                original_shape = array.shape
+                zoom_factors = (
+                    height / original_shape[0], width / original_shape[1])
+                arr_resized = zoom(array, zoom_factors, order=1)
+                # Normaliza para 0-255
+                arr_min, arr_max = np.min(arr_resized), np.max(arr_resized)
+                if arr_max - arr_min < 1e-6:
+                    arr_norm = np.zeros_like(arr_resized, dtype=np.uint8)
+                else:
+                    arr_norm = np.clip(
+                        (arr_resized - arr_min) / (arr_max - arr_min) * 255, 0, 255).astype(np.uint8)
+            # Cria RGB: R=valor normalizado, G=0, B=0
+            rgb_array = np.stack([arr_norm, np.zeros_like(
+                arr_norm), np.zeros_like(arr_norm)], axis=-1)
+            img = Image.fromarray(rgb_array, mode='RGB')
+            img.save(byte_array_path, format="WEBP", optimize=True)
+            return FileResponse(byte_array_path, media_type="image/webp")
     return endpoint
 
 
-def create_info_endpoint(file_path: str, param: str, units: str):
-    def endpoint(time_param: str, force: bool = False):
+def create_info_endpoint(param: str, units: str):
+    """
+    Factory function to create data information endpoint.
+
+    Args:
+        file_path: GRIB file path(s)
+        param: Weather parameter name(s)
+        units: Measurement units
+
+    Returns:
+        Endpoint function that serves metadata and statistics
+    """
+    def endpoint(time_param: str, cache: bool = True):
         """
-        Get metadata and statistics for weather parameter and time.
-        Shows value range, mean, std, bounds, resolution.
-        For wind, also shows uMin, uMax, vMin, vMax.
+        Get metadata and statistics for weather parameter.
+        Includes value range, mean, std deviation, spatial bounds, and resolution.
+
+        Args:
+            time_param: UTC time in format YYYYMMDDHH
+            cache: If True, use cached GRIB data if available
+
+        Returns:
+            JSON object with data statistics and metadata
         """
         parse_time_param(time_param)
 
-        # Handle wind (vector) layers
+        # Handle vector data (wind with U and V components)
         if isinstance(param, list) and len(param) == 2:
             # Download U and V components
-            u_data = download_grib(file_path[0], param[0], force, time_param)
-            v_data = download_grib(file_path[1], param[1], force, time_param)
+            u_data = download_grib(param[0], cache, time_param)
+            v_data = download_grib(param[1], cache, time_param)
+
             u = np.nan_to_num(u_data.values)
             v = np.nan_to_num(v_data.values)
-            values = np.sqrt(u**2 + v**2)  # Wind speed modulus
+            values = np.sqrt(u**2 + v**2)  # Wind speed magnitude
+
             # Use U's coordinates for bounds
             lat_coords = u_data.coords.get(
                 'latitude', u_data.coords.get('lat'))
             lon_coords = u_data.coords.get(
                 'longitude', u_data.coords.get('lon'))
-            # Calculate U/V min/max
-            uMin = float(np.min(u))
-            uMax = float(np.max(u))
-            vMin = float(np.min(v))
-            vMax = float(np.max(v))
+
+            # Calculate U/V component ranges
+            uMin, uMax = float(np.min(u)), float(np.max(u))
+            vMin, vMax = float(np.min(v)), float(np.max(v))
+
+        # Handle scalar data
         else:
-            # Scalar layer
-            data = download_grib(file_path, param, force)
-            values = np.nan_to_num(data.values, nan=np.nanmean(
-                data.values), time_param=time_param)
+            data = download_grib(param, cache, time_param)
+            values = np.nan_to_num(data.values, nan=np.nanmean(data.values))
+
             lat_coords = data.coords.get('latitude', data.coords.get('lat'))
             lon_coords = data.coords.get('longitude', data.coords.get('lon'))
+
             uMin = uMax = vMin = vMax = None
 
         # Calculate spatial bounds and resolution
         bounds = [-180, -90, 180, 90]
         resolution = {"lat": 0.25, "lon": 0.25}
+
         if lat_coords is not None and lon_coords is not None:
             lat_values, lon_values = lat_coords.values, lon_coords.values
-            bounds = [float(lon_values.min()), float(lat_values.min()), float(
-                lon_values.max()), float(lat_values.max())]
+            bounds = [
+                float(lon_values.min()),
+                float(lat_values.min()),
+                float(lon_values.max()),
+                float(lat_values.max())
+            ]
+
             if len(lat_values) > 1:
                 resolution["lat"] = float(abs(lat_values[1] - lat_values[0]))
             if len(lon_values) > 1:
@@ -647,8 +801,8 @@ def create_info_endpoint(file_path: str, param: str, units: str):
 
         # Calculate data statistics
         valid_values = values[~np.isnan(values)]
-        data_min, data_max = float(
-            np.min(valid_values)), float(np.max(valid_values))
+        data_min = float(np.min(valid_values))
+        data_max = float(np.max(valid_values))
 
         result = {
             "parameter": param,
@@ -666,71 +820,71 @@ def create_info_endpoint(file_path: str, param: str, units: str):
                 "resolution": resolution
             },
         }
-        # Add U/V min/max for wind
+
+        # Add U/V component ranges for wind data
         if uMin is not None:
             result["uMin"] = uMin
-        if uMax is not None:
             result["uMax"] = uMax
-        if vMin is not None:
             result["vMin"] = vMin
-        if vMax is not None:
             result["vMax"] = vMax
+
         return result
 
     return endpoint
 
-# ===============================
+
+# =========================================
 # DYNAMIC ENDPOINT REGISTRATION
-# ===============================
+# =========================================
 
-# Register endpoints for each weather theme
-
-
+# Register endpoints for each weather theme from configuration
 for theme, cfg in themes.items():
     # WebP weather map endpoint
     app.get(
-        f"/{theme}/{{time_param}}/data.webp",
+        f"/{theme}/{{time_param}}/data.color.webp",
         tags=[theme.replace('_', ' ').title()]
     )(
-        create_webp_endpoint(cfg["file"], cfg["variable"], cfg["palette"])
+        create_webp_endpoint(cfg["variable"], cfg["palette"])
     )
 
-    # GeoJSON isolines endpoint only for mean sea level pressure
+    # GeoJSON isolines endpoint (only for mean sea level pressure)
     if theme == "mean_sea_level_pressure":
         app.get(
             f"/{theme}/{{time_param}}/isolines.geojson",
             tags=[theme.replace('_', ' ').title()]
         )(
-            create_isolines_endpoint(cfg["file"], cfg["variable"])
+            create_isolines_endpoint(cfg["variable"])
         )
 
-    # Add wind texture endpoint for wind theme only
-    if theme == "wind" and isinstance(cfg["variable"], list):
-        app.get(
-            f"/{theme}/{{time_param}}/texture.png",
-            tags=[theme.replace('_', ' ').title()]
-        )(
-            create_wind_texture_endpoint(cfg["file"], cfg["variable"])
-        )
+    # Byte array WebP endpoint for all themes
+    app.get(
+        f"/{theme}/{{time_param}}/data.byte.webp",
+        tags=[theme.replace('_', ' ').title()]
+    )(
+        create_byte_endpoint(cfg["variable"])
+    )
 
     # Data information endpoint
     app.get(
         f"/{theme}/{{time_param}}/info",
         tags=[theme.replace('_', ' ').title()]
     )(
-        create_info_endpoint(cfg["file"], cfg["variable"], cfg["units"])
+        create_info_endpoint(cfg["variable"], cfg["units"])
     )
 
-# ===============================
-# STATIC AND ROOT ENDPOINTS
-# ===============================
 
+# =========================================
+# STATIC AND ROOT ENDPOINTS
+# =========================================
 
 @app.get("/themes.json", tags=["Static"], response_class=FileResponse)
 def get_themes_json():
     """
-    Returns the weather themes configuration file in JSON format.
-    Useful for discovering available weather map types and their parameters.
+    Get weather themes configuration file.
+    Contains available weather map types, parameters, and color palettes.
+
+    Returns:
+        JSON configuration file
     """
     return FileResponse("themes.json", media_type="application/json")
 
@@ -738,7 +892,10 @@ def get_themes_json():
 @app.get("/", tags=["Static"])
 def redirect_to_docs():
     """
-    Redirects the root URL to the interactive API documentation (Swagger UI).
+    Redirect root URL to interactive API documentation (Swagger UI).
+
+    Returns:
+        Redirect response to /docs
     """
     return RedirectResponse(url="/docs")
 
@@ -746,8 +903,11 @@ def redirect_to_docs():
 @app.get("/health", tags=["Static"])
 def health_check():
     """
-    Health check endpoint for monitoring API status and cache usage.
-    Returns basic status, current UTC timestamp, cache directory, and number of loaded themes.
+    Health check endpoint for monitoring API status.
+    Returns current timestamp, cache directory, and number of loaded themes.
+
+    Returns:
+        JSON object with health status information
     """
     return {
         "status": "healthy",

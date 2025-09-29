@@ -1,32 +1,34 @@
 # Tempo API
 
-Tempo API is a simple weather data service. It gives you weather maps and info for different weather types, like temperature, wind, rain, and pressure. You can run it with Docker or Python, and use it with any frontend (like Vue + Maplibre + Deck.gl).
+Tempo API is a weather data visualization and analysis service. It provides weather maps, isolines, and statistics for various meteorological parameters such as temperature, wind, precipitation, and pressure. The API is built with FastAPI and uses ECMWF OpenData as its data source.
 
-## What does it do?
+## Features
 
-- Gets weather data from ECMWF OpenData (global forecasts)
-- Makes color weather maps and isolines (contour lines)
-- Gives info and stats for each weather type
-- Has easy-to-use API endpoints
-- Shows docs at `/docs` (Swagger)
+- Retrieves global forecast data from ECMWF OpenData
+- Generates color weather maps and isolines (contour lines)
+- Provides metadata and statistics for each weather parameter
+- Offers easy-to-use REST API endpoints
+- Includes interactive documentation at `/docs` (Swagger UI)
+- Supports Docker and Python execution
 
-## How to start
+## Getting Started
 
-1. Install dependencies:
+1. **Install dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
-2. Run the API:
+2. **Run the API:**
    ```bash
    python main.py
    ```
-3. Or use Docker (recommended):
+3. **Or use Docker (recommended):**
    ```bash
    docker-compose up --build
    ```
-4. Open [http://localhost:3000/docs](http://localhost:3000/docs) in your browser
+4. **Open the documentation:**
+   [http://localhost:3000/docs](http://localhost:3000/docs)
 
-## Quick Vue + Deck.gl Example
+## Example: Vue + Deck.gl Integration
 
 ```vue
 <script setup>
@@ -44,7 +46,7 @@ onMounted(loadWeatherThemes);
   <div>
     <div v-for="layer in weatherLayers" :key="layer">
       <code>{{ layer }}</code>
-      <!-- Add your Deck.gl or image/geojson rendering here -->
+      <!-- Render your Deck.gl image or GeoJSON here -->
     </div>
   </div>
 </template>
@@ -52,13 +54,14 @@ onMounted(loadWeatherThemes);
 
 ## Main Endpoints
 
-- `/[layer]/{timestamp}/data.webp` — Weather map image
-- `/[layer]/{timestamp}/isolines.geojson` — Isolines (only for pressure)
-- `/[layer]/{timestamp}/info` — Info and stats
-- `/themes.json` — List of available layers
+- `/[layer]/{timestamp}/data.color.webp` — Weather map image (WebP, colorized)
+- `/[layer]/{timestamp}/data.byte.webp` — Byte array image (WebP, for WebGL)
+- `/[layer]/{timestamp}/isolines.geojson` — Isolines (GeoJSON, only for pressure)
+- `/[layer]/{timestamp}/info` — Metadata and statistics
+- `/themes.json` — List of available layers and palettes
 
-Replace `{layer}` with one of: `temperature`, `mean_sea_level_pressure`, `total_precipitation`, `wind`
-Replace `{timestamp}` with something like `2025091312` (YYYYMMDDHH)
+Replace `{layer}` with one of: `temperature`, `mean_sea_level_pressure`, `total_precipitation`, `wind`  
+Replace `{timestamp}` with a string like `2025091312` (format: YYYYMMDDHH)
 
 ## How to Add Layers to Your Map
 
@@ -68,7 +71,7 @@ Replace `{timestamp}` with something like `2025091312` (YYYYMMDDHH)
 
 ```js
 import { BitmapLayer } from "@deck.gl/layers";
-const imageUrl = `${apiBaseUrl}/temperature/{timestamp}/data.webp`;
+const imageUrl = `${apiBaseUrl}/temperature/{timestamp}/data.color.webp`;
 const bounds = [-180, -90, 180, 90];
 const temperatureLayer = new BitmapLayer({
   id: "temperature-layer",
@@ -83,13 +86,14 @@ const temperatureLayer = new BitmapLayer({
 deckOverlay.setProps({ layers: [temperatureLayer] });
 ```
 
+
 ### Mean Sea Level Pressure
 
 ![Mean Sea Level Pressure Map](/demo/mean_sea_level_pressure.png)
 
 ```js
 import { BitmapLayer, GeoJsonLayer } from "@deck.gl/layers";
-const imageUrl = `${apiBaseUrl}/mean_sea_level_pressure/{timestamp}/data.webp`;
+const imageUrl = `${apiBaseUrl}/mean_sea_level_pressure/{timestamp}/data.color.webp`;
 const geojsonUrl = `${apiBaseUrl}/mean_sea_level_pressure/{timestamp}/isolines.geojson`;
 const bounds = [-180, -90, 180, 90];
 const mslLayer = new BitmapLayer({
@@ -102,7 +106,6 @@ const mslLayer = new BitmapLayer({
   _imageCoordinateSystem: 1,
   autoHighlight: false,
 });
-
 const isolinesLayer = new GeoJsonLayer({
   id: "msl-isolines",
   data: geojsonUrl,
@@ -120,7 +123,7 @@ deckOverlay.setProps({ layers: [mslLayer, isolinesLayer] });
 
 ```js
 import { BitmapLayer } from "@deck.gl/layers";
-const imageUrl = `${apiBaseUrl}/total_precipitation/{timestamp}/data.webp`;
+const imageUrl = `${apiBaseUrl}/total_precipitation/{timestamp}/data.color.webp`;
 const bounds = [-180, -90, 180, 90];
 const precipLayer = new BitmapLayer({
   id: "precip-layer",
@@ -141,7 +144,7 @@ deckOverlay.setProps({ layers: [precipLayer] });
 
 ```js
 import { BitmapLayer } from "@deck.gl/layers";
-const imageUrl = `${apiBaseUrl}/wind/{timestamp}/data.webp`;
+const imageUrl = `${apiBaseUrl}/wind/{timestamp}/data.color.webp`;
 const bounds = [-180, -90, 180, 90];
 const windLayer = new BitmapLayer({
   id: "wind-layer",
@@ -156,9 +159,9 @@ const windLayer = new BitmapLayer({
 deckOverlay.setProps({ layers: [windLayer] });
 ```
 
-## Always Use the /info Endpoint for Tooltips
+## Always Use the `/info` Endpoint for Tooltips
 
-Before you show a layer or handle clicks for tooltips, always fetch `/[layer]/{timestamp}/info`. This gives you the correct bounds and image size for each layer and time. Use these values to map coordinates to pixels and get the right weather value. You can also show extra info from `/info`, like min/max values, units, and timestamp, in the tooltip.
+Before rendering a layer or handling tooltips/clicks, always fetch `/[layer]/{timestamp}/info`. This endpoint provides the correct bounds, image size, and statistics for each layer and time. Use these values to map coordinates to pixels and retrieve the correct weather value. You can also display extra information from `/info`, such as min/max values, units, and timestamp, in your tooltip.
 
 Example:
 
@@ -202,10 +205,12 @@ const handleClick = async (info, layerId) => {
 };
 ```
 
-This way, your tooltips will always be accurate and can show more useful info to the user.
+This ensures your tooltips are always accurate and provide useful information to users.
 
 ---
 
-Questions or ideas? Just open an issue or contact me.
+Questions or suggestions? Open an issue or contact the maintainer.
+
+---
 
 
