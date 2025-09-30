@@ -121,6 +121,126 @@ def parse_time_param(time_str: str) -> datetime:
 
 
 def download_grib(param: str, use_cache: bool = True, time_param: str = None) -> xr.DataArray:
+    """Download GRIB data with automatic fallback to available cycles."""
+    if time_param is None:
+        time_param = datetime.utcnow().strftime("%Y%m%d%H")
+    
+    dt = datetime.strptime(time_param, "%Y%m%d%H")
+    valid_cycles = [0, 6, 12, 18]
+    now = datetime.utcnow()
+    
+    # Determine initial cycle and step
+    cycle_hour = max([h for h in valid_cycles if h <= dt.hour], default=0)
+    cycle_dt = dt.replace(hour=cycle_hour, minute=0, second=0, microsecond=0)
+    step = int((dt - cycle_dt).total_seconds() // 3600)
+    
+    # Normalize step to multiples of 3
+    if step % 3 != 0:
+        step = step - (step % 3)
+    
+    # Build cache path
+    cycle_str = cycle_dt.strftime('%Y%m%d')
+    cache_path = os.path.join("static", "grib", f"{param}_{cycle_str}{cycle_hour:02d}_{step}.grib2")
+    
+    print(f"[GRIB] Requested: time={time_param}, cycle={cycle_str} {cycle_hour:02d}h, step={step}h")
+    
+    # Check cache first
+    if os.path.exists(cache_path) and use_cache:
+        print(f"[GRIB] Using cached file: {cache_path}")
+        ds = xr.open_dataset(cache_path, engine="cfgrib")
+        data = ds[param] if param in ds else ds[list(ds.data_vars)[0]]
+        if "time" not in data.dims:
+            data = data.expand_dims("time")
+        return data.isel(time=0)
+    
+    # Build list of cycles to try (current and previous cycles)
+    cycles_to_try = []
+    
+    # For requested time, try current cycle with different steps
+    for s in range(step, -1, -3):
+        cycles_to_try.append((cycle_dt, cycle_hour, s))
+    
+    # Try previous cycles on the same day
+    for prev_hour in reversed([h for h in valid_cycles if h < cycle_hour]):
+        prev_cycle = dt.replace(hour=prev_hour, minute=0, second=0, microsecond=0)
+        prev_step = int((dt - prev_cycle).total_seconds() // 3600)
+        if prev_step % 3 != 0:
+            prev_step = prev_step - (prev_step % 3)
+        if 0 <= prev_step <= 240:
+            cycles_to_try.append((prev_cycle, prev_hour, prev_step))
+    
+    # Try previous day's cycles if needed
+    if dt.hour < 6:
+        yesterday = dt - timedelta(days=1)
+        for prev_hour in reversed(valid_cycles):
+            prev_cycle = yesterday.replace(hour=prev_hour, minute=0, second=0, microsecond=0)
+            prev_step = int((dt - prev_cycle).total_seconds() // 3600)
+            if prev_step % 3 != 0:
+                prev_step = prev_step - (prev_step % 3)
+            if 0 <= prev_step <= 240:
+                cycles_to_try.append((prev_cycle, prev_hour, prev_step))
+    
+    # Try each cycle/step combination
+    client = Client(source="ecmwf")
+    
+    for try_cycle, try_hour, try_step in cycles_to_try:
+        try_cache_path = os.path.join(
+            "static", "grib", 
+            f"{param}_{try_cycle.strftime('%Y%m%d')}{try_hour:02d}_{try_step}.grib2"
+        )
+        
+        # Check if this cycle is already cached
+        if os.path.exists(try_cache_path):
+            print(f"[GRIB] Found cached alternative: cycle={try_cycle.strftime('%Y%m%d %H')}h, step={try_step}h")
+            ds = xr.open_dataset(try_cache_path, engine="cfgrib")
+            data = ds[param] if param in ds else ds[list(ds.data_vars)[0]]
+            if "time" not in data.dims:
+                data = data.expand_dims("time")
+            return data.isel(time=0)
+        
+        # Try to download
+        try:
+            print(f"[GRIB] Trying: cycle={try_cycle.strftime('%Y%m%d %H')}h, step={try_step}h")
+            
+            # Remove old index file if exists
+            idx_file = try_cache_path + ".idx"
+            if os.path.exists(idx_file):
+                os.remove(idx_file)
+            
+            client.retrieve(
+                date=try_cycle.strftime('%Y%m%d'),
+                time=try_hour,
+                type="fc",
+                stream="oper",
+                step=try_step,
+                param=param,
+                target=try_cache_path
+            )
+            
+            print(f"[GRIB] Success! Downloaded: cycle={try_cycle.strftime('%Y%m%d %H')}h, step={try_step}h")
+            
+            ds = xr.open_dataset(try_cache_path, engine="cfgrib")
+            data = ds[param] if param in ds else ds[list(ds.data_vars)[0]]
+            if "time" not in data.dims:
+                data = data.expand_dims("time")
+            return data.isel(time=0)
+            
+        except Exception as e:
+            import requests
+            if hasattr(e, 'response') and isinstance(e.response, requests.Response) and e.response.status_code == 404:
+                print(f"[GRIB] Not found: cycle={try_cycle.strftime('%Y%m%d %H')}h, step={try_step}h (404)")
+                continue
+            else:
+                print(f"[GRIB] Error: {str(e)}")
+                # For non-404 errors, continue trying other cycles
+                continue
+    
+    # If we've tried everything and nothing worked
+    raise HTTPException(
+        status_code=404, 
+        detail=f"No ECMWF data available for {param} near {time_param}. Tried {len(cycles_to_try)} cycle/step combinations."
+    )
+
     # Get timestamp from time_param (always from request)
     # file_path is only the base name, not timestamp
     # time_param is always passed by endpoints
@@ -222,6 +342,7 @@ def download_grib(param: str, use_cache: bool = True, time_param: str = None) ->
                     param=param,
                     target=cache_path
                 )
+                print(f"[GRIB-LEGACY] Retrieved latest cycle for future timestamp: original cycle={cycle_dt}, original step={step}, requested cycle hour={time}")
                 ciclo_real = result.datetime
                 step_corrigido = int((dt - ciclo_real).total_seconds() // 3600)
                 if step_corrigido < 0:
@@ -234,6 +355,7 @@ def download_grib(param: str, use_cache: bool = True, time_param: str = None) ->
                     param=param,
                     target=cache_path
                 )
+                print(f"[GRIB-LEGACY] Future cycle adjusted: original cycle={cycle_dt}, original step={step}, actual cycle={ciclo_real}, adjusted step={step_corrigido}")
             else:
                 idx_file = cache_path + ".idx"
                 if os.path.exists(idx_file):
@@ -248,6 +370,7 @@ def download_grib(param: str, use_cache: bool = True, time_param: str = None) ->
                     param=param,
                     target=cache_path
                 )
+                print(f"[GRIB-LEGACY] Retrieved past cycle: {cycle_dt}, step={step_value}")
             return True
         except Exception as e:
             import requests
@@ -871,6 +994,155 @@ for theme, cfg in themes.items():
     )(
         create_info_endpoint(cfg["variable"], cfg["units"])
     )
+
+
+# =========================================
+# V1 API ENDPOINTS
+# =========================================
+
+@app.get("/v1/", tags=["v1"])
+def get_v1_info():
+    """
+    Get API v1 information and available endpoints.
+    
+    Returns:
+        JSON object with API v1 metadata and available endpoints
+    """
+    return {
+        "api": "Tempo API",
+        "version": "1.0.0",
+        "description": "Weather data visualization and analysis API using ECMWF OpenData",
+        "endpoints": {
+            "themes": "/v1/themes",
+            "health": "/v1/health",
+            "weather_maps": "/v1/{theme}/{timestamp}/data.color.webp",
+            "isolines": "/v1/{theme}/{timestamp}/isolines.geojson",
+            "byte_data": "/v1/{theme}/{timestamp}/data.byte.webp",
+            "metadata": "/v1/{theme}/{timestamp}/info"
+        },
+        "data_source": "ECMWF OpenData",
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+
+@app.get("/v1/themes", tags=["v1"])
+def get_v1_themes():
+    """
+    Get available weather themes and their configurations.
+    
+    Returns:
+        JSON object with all available weather themes and their parameters
+    """
+    return {
+        "themes": themes,
+        "count": len(themes),
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+
+@app.get("/v1/health", tags=["v1"])
+def get_v1_health():
+    """
+    Health check endpoint for API v1.
+    
+    Returns:
+        JSON object with health status and system information
+    """
+    return {
+        "status": "healthy",
+        "version": "1.0.0",
+        "timestamp": datetime.utcnow().isoformat(),
+        "cache_directory": "static/",
+        "themes_loaded": len(themes),
+        "grib_files": len(glob.glob("static/grib/*.grib2"))
+    }
+
+
+@app.get("/v1/{theme}/{time_param}/data.color.webp", tags=["v1"])
+def get_v1_webp_map(theme: str, time_param: str, cache: bool = True, width: int = None, height: int = None):
+    """
+    Get weather map as WebP image (v1 endpoint).
+    
+    Args:
+        theme: Weather theme name (e.g., 'temperature', 'wind')
+        time_param: UTC time in format YYYYMMDDHH
+        cache: If True, use cached image if available
+        width: Output image width (optional)
+        height: Output image height (optional)
+        
+    Returns:
+        WebP image file with weather visualization
+    """
+    if theme not in themes:
+        raise HTTPException(status_code=404, detail=f"Theme '{theme}' not found")
+    
+    endpoint_func = create_webp_endpoint(themes[theme]["variable"], themes[theme]["palette"])
+    return endpoint_func(time_param, cache, width, height)
+
+
+@app.get("/v1/{theme}/{time_param}/isolines.geojson", tags=["v1"])
+def get_v1_isolines(theme: str, time_param: str, cache: bool = True, background_tasks: BackgroundTasks = None, request: Request = None):
+    """
+    Get GeoJSON isolines for weather data (v1 endpoint).
+    
+    Args:
+        theme: Weather theme name (only 'mean_sea_level_pressure' supported for isolines)
+        time_param: UTC time in format YYYYMMDDHH
+        cache: If True, use cached GeoJSON if available
+        
+    Returns:
+        GeoJSON FeatureCollection with isolines
+    """
+    if theme not in themes:
+        raise HTTPException(status_code=404, detail=f"Theme '{theme}' not found")
+    
+    if theme != "mean_sea_level_pressure":
+        raise HTTPException(status_code=400, detail="Isolines only available for mean_sea_level_pressure theme")
+    
+    endpoint_func = create_isolines_endpoint(themes[theme]["variable"])
+    return endpoint_func(time_param, cache, background_tasks, request)
+
+
+@app.get("/v1/{theme}/{time_param}/data.byte.webp", tags=["v1"])
+def get_v1_byte_data(theme: str, time_param: str, cache: bool = True, width: int = 360, height: int = 180):
+    """
+    Get byte array WebP for WebGL applications (v1 endpoint).
+    
+    Args:
+        theme: Weather theme name
+        time_param: UTC time in format YYYYMMDDHH
+        cache: If True, use cached data if available
+        width: Output width (default: 360)
+        height: Output height (default: 180)
+        
+    Returns:
+        WebP image with encoded byte data for WebGL
+    """
+    if theme not in themes:
+        raise HTTPException(status_code=404, detail=f"Theme '{theme}' not found")
+    
+    endpoint_func = create_byte_endpoint(themes[theme]["variable"])
+    return endpoint_func(time_param, cache, width, height)
+
+
+@app.get("/v1/{theme}/{time_param}/info", tags=["v1"])
+def get_v1_metadata(theme: str, time_param: str, cache: bool = True):
+    """
+    Get metadata and statistics for weather parameter (v1 endpoint).
+    
+    Args:
+        theme: Weather theme name
+        time_param: UTC time in format YYYYMMDDHH
+        cache: If True, use cached data if available
+        
+    Returns:
+        JSON object with data statistics and metadata
+    """
+    if theme not in themes:
+        raise HTTPException(status_code=404, detail=f"Theme '{theme}' not found")
+    
+    endpoint_func = create_info_endpoint(themes[theme]["variable"], themes[theme]["units"])
+    return endpoint_func(time_param, cache)
 
 
 # =========================================
