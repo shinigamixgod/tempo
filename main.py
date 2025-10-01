@@ -4,6 +4,10 @@ Weather data visualization and analysis API using ECMWF OpenData.
 Provides WebP maps, GeoJSON isolines, byte arrays for WebGL, and metadata endpoints.
 """
 
+# =========================================
+# IMPORTS AND DEPENDENCIES
+# =========================================
+
 from fastapi import HTTPException
 import shapely
 from scipy.ndimage import zoom
@@ -24,10 +28,6 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 import warnings
 warnings.filterwarnings('ignore', category=FutureWarning, module='cfgrib')
-
-# =========================================
-# IMPORTS AND DEPENDENCIES
-# =========================================
 
 
 # =========================================
@@ -240,160 +240,6 @@ def download_grib(param: str, use_cache: bool = True, time_param: str = None) ->
         status_code=404, 
         detail=f"No ECMWF data available for {param} near {time_param}. Tried {len(cycles_to_try)} cycle/step combinations."
     )
-
-    # Get timestamp from time_param (always from request)
-    # file_path is only the base name, not timestamp
-    # time_param is always passed by endpoints
-    if time_param is None:
-        time_param = datetime.utcnow().strftime("%Y%m%d%H")
-    dt = datetime.strptime(time_param, "%Y%m%d%H")
-    valid_cycles = [0, 6, 12, 18]
-    cycle_hour = max([h for h in valid_cycles if h <= dt.hour], default=None)
-    if cycle_hour is None:
-        cycle_hour = valid_cycles[0]
-    cycle_dt = dt.replace(hour=cycle_hour, minute=0, second=0, microsecond=0)
-    step = int((dt - cycle_dt).total_seconds() // 3600)
-    time = cycle_hour
-
-    # If step is not valid, use previous cycle and step 0
-    if step not in valid_cycles:
-        idx = valid_cycles.index(cycle_hour)
-        if idx > 0:
-            cycle_hour = valid_cycles[idx-1]
-            cycle_dt = dt.replace(
-                hour=cycle_hour, minute=0, second=0, microsecond=0)
-            step = int((dt - cycle_dt).total_seconds() // 3600)
-            time = cycle_hour
-            pass
-        else:
-            pass
-            step = 0
-            cycle_dt = dt.replace(
-                hour=valid_cycles[0], minute=0, second=0, microsecond=0)
-            time = valid_cycles[0]
-
-
-    # O cache é sempre por ciclo/step do timestamp solicitado
-    cycle_str = cycle_dt.strftime('%Y%m%d')
-    cache_path = os.path.join(
-        "static", "grib", f"{param}_{cycle_str}{time:02d}_{step}.grib2")
-
-    # Diagnostic print for debugging GRIB retrieval
-    print(f"[GRIB-LEGACY] param={param}, time_param={time_param}, cycle={cycle_str} hour={time}, step={step}, cache_path={cache_path}")
-
-    # Requested param, time_param, file_path, cache_path, force
-
-    # Use cache file if available and not forcing download
-    if os.path.exists(cache_path) and not use_cache:
-        # Using cached GRIB file
-        ds = xr.open_dataset(cache_path, engine="cfgrib")
-        data = ds[param] if param in ds else ds[list(ds.data_vars)[0]]
-        if "time" not in data.dims:
-            data = data.expand_dims("time")
-        # GRIB file loaded from cache
-        return data.isel(time=0)
-
-    # Calculate time and step for ECMWF client
-    dt = datetime.strptime(time_param, "%Y%m%d%H")
-    valid_cycles = [0, 6, 12, 18]
-    cycle_hour = max([h for h in valid_cycles if h <= dt.hour], default=None)
-    if cycle_hour is None:
-        raise HTTPException(
-            status_code=400, detail=f"No valid ECMWF cycle for hour {dt.hour}")
-    cycle_dt = dt.replace(hour=cycle_hour)
-    step = int((dt - cycle_dt).total_seconds() // 3600)
-    time = cycle_hour
-
-    # If step is not valid, use previous cycle and step 0
-    if step not in valid_cycles:
-        idx = valid_cycles.index(cycle_hour)
-        if idx > 0:
-            cycle_hour = valid_cycles[idx-1]
-            cycle_dt = dt.replace(hour=cycle_hour)
-            step = int((dt - cycle_dt).total_seconds() // 3600)
-            time = cycle_hour
-        else:
-            step = 0
-            cycle_dt = dt.replace(hour=valid_cycles[0])
-            time = valid_cycles[0]
-
-    # Validations
-    now = datetime.utcnow()
-    ciclo_futuro = dt > now
-    if step < 0:
-        step = 0
-    # ECMWF only accepts steps multiple of 3
-    if step % 3 != 0:
-        step = step - (step % 3)
-    if step > 240:
-        raise HTTPException(
-            status_code=400, detail=f"Step {step}h out of ECMWF range (max 240h)")
-
-    def try_retrieve(step_value):
-        try:
-            if ciclo_futuro:
-                # If future timestamp, get latest ECMWF cycle and adjust step
-                client = Client(source="ecmwf")
-                result = client.retrieve(
-                    time=time,
-                    type="fc",
-                    stream="oper",
-                    step=0,
-                    param=param,
-                    target=cache_path
-                )
-                print(f"[GRIB-LEGACY] Retrieved latest cycle for future timestamp: original cycle={cycle_dt}, original step={step}, requested cycle hour={time}")
-                ciclo_real = result.datetime
-                step_corrigido = int((dt - ciclo_real).total_seconds() // 3600)
-                if step_corrigido < 0:
-                    return False
-                client.retrieve(
-                    time=time,
-                    type="fc",
-                    stream="oper",
-                    step=step_corrigido,
-                    param=param,
-                    target=cache_path
-                )
-                print(f"[GRIB-LEGACY] Future cycle adjusted: original cycle={cycle_dt}, original step={step}, actual cycle={ciclo_real}, adjusted step={step_corrigido}")
-            else:
-                idx_file = cache_path + ".idx"
-                if os.path.exists(idx_file):
-                    os.remove(idx_file)
-                client = Client(source="ecmwf")
-                client.retrieve(
-                    date=cycle_dt.strftime('%Y%m%d'),
-                    time=time,
-                    type="fc",
-                    stream="oper",
-                    step=step_value,
-                    param=param,
-                    target=cache_path
-                )
-                print(f"[GRIB-LEGACY] Retrieved past cycle: {cycle_dt}, step={step_value}")
-            return True
-        except Exception as e:
-            import requests
-            if hasattr(e, 'response') and isinstance(e.response, requests.Response) and e.response.status_code == 404:
-                return False
-            else:
-                raise
-
-    # Try requested step, then previous valid steps
-    fallback_steps = [step] + [s for s in range(step-3, -1, -3) if s >= 0]
-    found = False
-    for s in fallback_steps:
-        if try_retrieve(s):
-            found = True
-            break
-    if not found:
-        raise HTTPException(
-            status_code=404, detail=f"No ECMWF data for cycle={cycle_dt}, param={param}, steps={fallback_steps}")
-    ds = xr.open_dataset(cache_path, engine="cfgrib")
-    data = ds[param] if param in ds else ds[list(ds.data_vars)[0]]
-    if "time" not in data.dims:
-        data = data.expand_dims("time")
-    return data.isel(time=0)
 
 
 # =========================================
