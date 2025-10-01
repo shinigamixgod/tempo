@@ -635,7 +635,7 @@ def create_byte_endpoint(params: list):
     Factory function to create byte array WebP endpoint for WebGL.
     Suporta vetorial (U/V) e escalar (1 parâmetro).
     """
-    def endpoint(time_param: str, cache: bool = True, width: int = 360, height: int = 180):
+    def endpoint(time_param: str, cache: bool = True, width: int = 1024, height: int = 512):
         parse_time_param(time_param)
 
         # Vetorial (ex: wind)
@@ -950,7 +950,7 @@ def get_v1_isolines(theme: str, time_param: str, cache: bool = True, background_
 
 
 @app.get("/v1/{theme}/{time_param}/data.byte.webp", tags=["v1"])
-def get_v1_byte_data(theme: str, time_param: str, cache: bool = True, width: int = 360, height: int = 180):
+def get_v1_byte_data(theme: str, time_param: str, cache: bool = True, width: int = 1024, height: int = 512):
     """
     Get byte array WebP for WebGL applications (v1 endpoint).
     
